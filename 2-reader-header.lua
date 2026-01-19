@@ -71,10 +71,6 @@ local SEPARATOR_STYLES = {
     "custom",
 }
 
--- Session state (resets on each KOReader launch)
-local session_initialized = false
-local session_opaque_mode = nil
-
 -- Default header items
 local header_defaults = {
     enabled = true,
@@ -98,7 +94,9 @@ local header_defaults = {
     wifi_on_only = false,
     title_max_width = 100,
     header_opacity = 100,
-    start_in_transparent = false,
+    background_opacity = 70,
+    background_enabled = false,
+    auto_background_for_pdf = true,
 }
 
 local function getHeaderSettings()
@@ -129,14 +127,9 @@ local function getHeaderSettings()
     if settings.wifi_on_only == nil then settings.wifi_on_only = false end
     if settings.title_max_width == nil then settings.title_max_width = 100 end
     if settings.header_opacity == nil then settings.header_opacity = 100 end
-    if settings.start_in_transparent == nil then settings.start_in_transparent = false end
-    -- Set initial opaque mode on first load (using module-level variable that resets each session)
-    if not session_initialized then
-        session_opaque_mode = not settings.start_in_transparent
-        session_initialized = true
-    end
-    -- Apply session opaque mode to settings
-    settings._temp_opaque_mode = session_opaque_mode
+    if settings.background_opacity == nil then settings.background_opacity = 70 end
+    if settings.background_enabled == nil then settings.background_enabled = false end
+    if settings.auto_background_for_pdf == nil then settings.auto_background_for_pdf = true end
     -- Migrate old custom_text_1 and custom_text_2 to new format
     if settings.custom_text_1 and #settings.custom_texts == 0 then
         table.insert(settings.custom_texts, settings.custom_text_1)
@@ -483,27 +476,35 @@ local function setupHeaderTouchZone(reader_ui)
             screen_zone = header_zone,
             handler = function(ges)
                 local h_settings = getHeaderSettings()
-                local user_opacity = h_settings.header_opacity or 100
                 
-                -- Cycle modes: 
-                -- If opacity < 100%: opaque (full) -> transparent -> off -> opaque...
-                -- If opacity = 100%: on -> off -> on...
-                if not h_settings.enabled then
-                    -- Currently off -> switch to full (opaque)
-                    h_settings.enabled = true
-                    session_opaque_mode = true
-                elseif session_opaque_mode then
-                    -- Currently opaque (full)
-                    if user_opacity < 100 then
-                        -- -> switch to transparent
-                        session_opaque_mode = false
-                    else
-                        -- Opacity is 100%, just toggle off
-                        h_settings.enabled = false
-                        session_opaque_mode = false
+                -- Mark that background has been manually set
+                h_settings._background_manually_set = true
+                
+                -- Check if background option is available:
+                -- 1. Manually enabled in settings, OR
+                -- 2. Auto-enabled for this PDF
+                local background_available = h_settings.background_enabled
+                if not background_available and h_settings.auto_background_for_pdf and reader_ui.document then
+                    local doc_info = reader_ui.document.info
+                    if doc_info and doc_info.has_pages then
+                        background_available = true
                     end
+                end
+                
+                -- Cycle modes
+                if not h_settings.enabled then
+                    -- Currently off -> turn on without background
+                    h_settings.enabled = true
+                    h_settings.background_enabled = false
+                elseif background_available and h_settings.background_enabled then
+                    -- Currently on with background -> turn off
+                    h_settings.enabled = false
+                    h_settings.background_enabled = false
+                elseif background_available and not h_settings.background_enabled then
+                    -- Currently on without background -> enable background
+                    h_settings.background_enabled = true
                 else
-                    -- Currently transparent -> switch to off
+                    -- Background not available, just toggle on/off
                     h_settings.enabled = false
                 end
                 
@@ -894,6 +895,27 @@ ReaderView.paintTo = function(self, bb, x, y)
     if show_progress_bar then
         total_height = total_height + progress_bar_margin + progress_bar_height
     end
+    
+    -- Check if background should be drawn
+    local background_enabled = h_settings.background_enabled
+    
+    -- Auto-enable for PDFs (doesn't change the setting, just renders with background)
+    if not background_enabled and h_settings.auto_background_for_pdf and self.ui.document then
+        local doc_info = self.ui.document.info
+        if doc_info and doc_info.has_pages then
+            -- Only apply auto-enable if user hasn't manually cycled yet
+            if h_settings._background_manually_set ~= true then
+                background_enabled = true
+            end
+        end
+    end
+    
+    -- Draw semi-transparent background if enabled
+    if background_enabled then
+        local bg_intensity = (h_settings.background_opacity or 70) / 100.0
+        -- Lighten the area behind the header (blend white over background)
+        bb:lightenRect(x, y, screen_width, total_height, bg_intensity)
+    end
 
     -- Build header widget
     local header = CenterContainer:new {
@@ -905,8 +927,7 @@ ReaderView.paintTo = function(self, bb, x, y)
     }
     
     -- Apply opacity/transparency
-    -- If _temp_opaque_mode is set, force 100% opacity
-    local opacity = h_settings._temp_opaque_mode and 100 or (h_settings.header_opacity or 100)
+    local opacity = h_settings.header_opacity or 100
     if opacity < 100 then
         -- Create a compose buffer for alpha blending
         local compose_bb = Blitbuffer.new(screen_width, total_height, bb:getType())
@@ -937,6 +958,19 @@ local orig_ReaderUI_init = ReaderUI.init
 function ReaderUI:init()
     orig_ReaderUI_init(self)
     setupHeaderTouchZone(self)
+    
+    -- Auto-enable header for PDFs/CBZ if auto_background_for_pdf is on
+    local h_settings = getHeaderSettings()
+    if h_settings.auto_background_for_pdf and self.document then
+        local doc_info = self.document.info
+        if doc_info and doc_info.has_pages then
+            -- Only auto-enable if user hasn't manually set it yet
+            if h_settings._background_manually_set ~= true then
+                h_settings.enabled = true
+                saveHeaderSettings(h_settings)
+            end
+        end
+    end
 end
 
 -- Hook into ReaderView to handle frontlight state changes for header refresh
@@ -968,9 +1002,10 @@ local orig_ReaderView_onCloseDocument = ReaderView.onCloseDocument
 ReaderView.onCloseDocument = function(self, ...)
     -- Clear header caches before document closes
     self._header_cache = nil
-    -- Reset opaque mode for next book based on user preference
+    -- Reset manual background flag so auto-enable can work on next document
     local h_settings = getHeaderSettings()
-    session_opaque_mode = not h_settings.start_in_transparent
+    h_settings._background_manually_set = false
+    saveHeaderSettings(h_settings)
     if orig_ReaderView_onCloseDocument then
         return orig_ReaderView_onCloseDocument(self, ...)
     end
@@ -1684,10 +1719,7 @@ Examples:
                 },
             },
             {
-                text_func = function()
-                    local h_settings = getHeaderSettings()
-                    return T(_("Opacity: %1%"), h_settings.header_opacity or 100)
-                end,
+                text = _("Status bar opacity"),
                 callback = function(touchmenu_instance)
                     local h_settings = getHeaderSettings()
                     local SpinWidget = require("ui/widget/spinwidget")
@@ -1697,8 +1729,8 @@ Examples:
                         value_max = 100,
                         value_step = 5,
                         value_hold_step = 10,
-                        title_text = _("Header opacity"),
-                        info_text = _("Adjust transparency of the header bar including progress bar (100% = fully opaque, 0% = fully transparent)"),
+                        title_text = _("Status bar opacity"),
+                        info_text = _("Adjust transparency of the status bar content (100% = fully opaque, 0% = fully transparent)"),
                         ok_text = _("Set opacity"),
                         callback = function(spin)
                             h_settings.header_opacity = spin.value
@@ -1714,21 +1746,71 @@ Examples:
                 keep_menu_open = true,
             },
             {
-                text = _("Start in transparent mode"),
-                checked_func = function()
-                    local h_settings = getHeaderSettings()
-                    return h_settings.start_in_transparent
-                end,
-                enabled_func = function()
-                    local h_settings = getHeaderSettings()
-                    return (h_settings.header_opacity or 100) < 100
-                end,
-                callback = function(touchmenu_instance)
-                    local h_settings = getHeaderSettings()
-                    h_settings.start_in_transparent = not h_settings.start_in_transparent
-                    saveHeaderSettings(h_settings)
-                    touchmenu_instance:updateItems()
-                end,
+                text = _("Status bar background opacity"),
+                sub_item_table = {
+                    {
+                        text = _("Enable for all books"),
+                        checked_func = function()
+                            local h_settings = getHeaderSettings()
+                            return h_settings.background_enabled
+                        end,
+                        callback = function(touchmenu_instance)
+                            local h_settings = getHeaderSettings()
+                            h_settings.background_enabled = not h_settings.background_enabled
+                            saveHeaderSettings(h_settings)
+                            touchmenu_instance:updateItems()
+                            if self.ui and self.ui.document then
+                                UIManager:setDirty(self.ui.dialog, "ui")
+                            end
+                        end,
+                    },
+                    {
+                        text = _("Enable for non-reflowable books"),
+                        checked_func = function()
+                            local h_settings = getHeaderSettings()
+                            return h_settings.auto_background_for_pdf
+                        end,
+                        callback = function(touchmenu_instance)
+                            local h_settings = getHeaderSettings()
+                            h_settings.auto_background_for_pdf = not h_settings.auto_background_for_pdf
+                            saveHeaderSettings(h_settings)
+                            touchmenu_instance:updateItems()
+                            if self.ui and self.ui.document then
+                                UIManager:setDirty(self.ui.dialog, "ui")
+                            end
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            local h_settings = getHeaderSettings()
+                            return T(_("Background opacity: %1%"), h_settings.background_opacity or 70)
+                        end,
+                        callback = function(touchmenu_instance)
+                            local h_settings = getHeaderSettings()
+                            local SpinWidget = require("ui/widget/spinwidget")
+                            local spin_widget = SpinWidget:new{
+                                value = h_settings.background_opacity or 70,
+                                value_min = 0,
+                                value_max = 100,
+                                value_step = 5,
+                                value_hold_step = 10,
+                                title_text = _("Background opacity"),
+                                info_text = _("Opacity of the background behind status bar (100% = fully opaque, 0% = fully transparent)"),
+                                ok_text = _("Set opacity"),
+                                callback = function(spin)
+                                    h_settings.background_opacity = spin.value
+                                    saveHeaderSettings(h_settings)
+                                    touchmenu_instance:updateItems()
+                                    if self.ui and self.ui.document then
+                                        UIManager:setDirty(self.ui.dialog, "ui")
+                                    end
+                                end,
+                            }
+                            UIManager:show(spin_widget)
+                        end,
+                        keep_menu_open = true,
+                    },
+                },
                 separator = true,
             },
             {
