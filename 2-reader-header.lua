@@ -130,15 +130,49 @@ local function getHeaderSettings()
     if settings.background_opacity == nil then settings.background_opacity = 70 end
     if settings.background_enabled == nil then settings.background_enabled = false end
     if settings.auto_background_for_pdf == nil then settings.auto_background_for_pdf = true end
-    -- Migrate old custom_text_1 and custom_text_2 to new format
-    if settings.custom_text_1 and #settings.custom_texts == 0 then
-        table.insert(settings.custom_texts, settings.custom_text_1)
-        settings.custom_text_1 = nil
+    
+    -- Clean up unsupported settings - keep only valid keys
+    local valid_keys = {
+        enabled = true,
+        items = true,
+        separator_style = true,
+        item_separator = true,
+        show_progress_bar = true,
+        progress_bar_height = true,
+        progress_bar_mode = true,
+        chapter_markers = true,
+        font_size = true,
+        font_bold = true,
+        custom_texts = true,
+        disabled_custom_texts = true,
+        custom_separator = true,
+        header_top_margin = true,
+        header_side_margin = true,
+        header_bottom_margin = true,
+        follow_book_margins = true,
+        hide_icons = true,
+        wifi_on_only = true,
+        title_max_width = true,
+        header_opacity = true,
+        background_opacity = true,
+        background_enabled = true,
+        auto_background_for_pdf = true,
+        _background_manually_set = true,  -- Internal tracking state
+    }
+    
+    local cleaned = false
+    for key in pairs(settings) do
+        if not valid_keys[key] then
+            settings[key] = nil
+            cleaned = true
+        end
     end
-    if settings.custom_text_2 and #settings.custom_texts < 2 then
-        table.insert(settings.custom_texts, settings.custom_text_2)
-        settings.custom_text_2 = nil
+    
+    -- Save settings if we cleaned anything
+    if cleaned then
+        G_reader_settings:saveSetting("custom_header", settings)
     end
+    
     return settings
 end
 
