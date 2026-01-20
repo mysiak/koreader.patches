@@ -8,7 +8,8 @@ local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 
 -- Settings
-local min_brightness_setting = G_reader_settings:readSetting("brightness_tweaks_min_brightness", 1)
+local default_min_brightness = 1
+local min_brightness_setting = G_reader_settings:readSetting("brightness_tweaks_min_brightness", default_min_brightness)
 local round_to_5_setting = G_reader_settings:readSetting("brightness_tweaks_round_to_5", false)
 local usb_brightness_enabled = G_reader_settings:readSetting("brightness_tweaks_usb_enabled", false)
 local usb_brightness_level = G_reader_settings:readSetting("brightness_tweaks_usb_level", 5)
@@ -46,7 +47,7 @@ local function checkChargingState()
     polling_scheduled = false
     
     if not usb_brightness_enabled or not Device:hasFrontlight() then
-        return
+        return  -- Stop polling if feature disabled
     end
     
     local powerd = Device:getPowerDevice()
@@ -76,6 +77,7 @@ local function checkChargingState()
         G_reader_settings:flush()
     end
     
+    -- Only schedule next check if feature still enabled
     if usb_brightness_enabled then
         polling_scheduled = true
         UIManager:scheduleIn(2, checkChargingState)
@@ -92,6 +94,8 @@ end
 
 local function stopPolling()
     polling_scheduled = false
+    -- Note: Can't cancel already-scheduled events in UIManager
+    -- Next scheduled check will exit early due to polling_scheduled flag
 end
 
 -- Start polling if feature enabled
@@ -149,105 +153,94 @@ if Device:hasFrontlight() then
     end
 end
 
--- Menu - consolidated in Settings
+-- Menu
 local ReaderMenu = require("apps/reader/modules/readermenu")
 local orig_setUpdateItemTable = ReaderMenu.setUpdateItemTable
 
 function ReaderMenu:setUpdateItemTable()
     local menu_order = require("ui/elements/reader_menu_order")
 
-    -- Add single menu entry to Settings
-    if not menu_order.setting.brightness_tweaks then
-        table.insert(menu_order.setting, "brightness_tweaks")
+    if not menu_order.setting.min_brightness_gesture then
+        table.insert(menu_order.setting, "min_brightness_gesture")
     end
 
-    self.menu_items.brightness_tweaks = {
+    self.menu_items.min_brightness_gesture = {
         text = _("Brightness tweaks"),
         separator = true,
         sub_item_table = {
             {
-                text = _("Gesture protection"),
-                sub_item_table = {
-                    {
-                        text = _("Set minimum brightness"),
-                        keep_menu_open = true,
-                        callback = function(touchmenu_instance)
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local spin_widget = SpinWidget:new{
-                                value = min_brightness_setting,
-                                value_min = 0,
-                                value_max = 100,
-                                value_step = 1,
-                                value_hold_step = 5,
-                                title_text = _("Minimum brightness for swipe gestures"),
-                                info_text = _("Prevents accidentally setting brightness too low via swipe gestures. Manual brightness settings are not affected. Set to 0 to disable."),
-                                ok_text = _("Set minimum"),
-                                callback = function(spin)
-                                    min_brightness_setting = spin.value
-                                    G_reader_settings:saveSetting("brightness_tweaks_min_brightness", min_brightness_setting)
-                                    touchmenu_instance:updateItems()
-                                end,
-                            }
-                            UIManager:show(spin_widget)
+                text = _("Set minimum brightness"),
+                keep_menu_open = true,
+                callback = function(touchmenu_instance)
+                    local SpinWidget = require("ui/widget/spinwidget")
+                    local spin_widget = SpinWidget:new{
+                        value = min_brightness_setting,
+                        value_min = 0,
+                        value_max = 100,
+                        value_step = 1,
+                        value_hold_step = 5,
+                        title_text = _("Minimum brightness for swipe gestures"),
+                        info_text = _("Prevents accidentally setting brightness too low via swipe gestures. Manual brightness settings are not affected. Set to 0 to disable."),
+                        ok_text = _("Set minimum"),
+                        callback = function(spin)
+                            min_brightness_setting = spin.value
+                            G_reader_settings:saveSetting("brightness_tweaks_min_brightness", min_brightness_setting)
+                            touchmenu_instance:updateItems()
                         end,
-                    },
-                    {
-                        text = _("Round to multiples of 5"),
-                        checked_func = function()
-                            return round_to_5_setting
-                        end,
-                        callback = function()
-                            round_to_5_setting = not round_to_5_setting
-                            G_reader_settings:saveSetting("brightness_tweaks_round_to_5", round_to_5_setting)
-                        end,
-                    },
-                },
+                    }
+                    UIManager:show(spin_widget)
+                end,
             },
             {
-                text = _("USB charging automation"),
-                sub_item_table = {
-                    {
-                        text = _("Low brightness when charging"),
-                        checked_func = function()
-                            return usb_brightness_enabled
+                text = _("Round to multiples of 5"),
+                checked_func = function()
+                    return round_to_5_setting
+                end,
+                callback = function()
+                    round_to_5_setting = not round_to_5_setting
+                    G_reader_settings:saveSetting("brightness_tweaks_round_to_5", round_to_5_setting)
+                end,
+            },
+            {
+                text = _("Low brightness when charging"),
+                checked_func = function()
+                    return usb_brightness_enabled
+                end,
+                callback = function()
+                    usb_brightness_enabled = not usb_brightness_enabled
+                    G_reader_settings:saveSetting("brightness_tweaks_usb_enabled", usb_brightness_enabled)
+                    if usb_brightness_enabled then
+                        startPolling()
+                    else
+                        stopPolling()
+                    end
+                end,
+            },
+            {
+                text = _("Charging brightness level"),
+                keep_menu_open = true,
+                enabled_func = function()
+                    return usb_brightness_enabled
+                end,
+                callback = function(touchmenu_instance)
+                    local SpinWidget = require("ui/widget/spinwidget")
+                    local spin_widget = SpinWidget:new{
+                        value = usb_brightness_level,
+                        value_min = 0,
+                        value_max = 100,
+                        value_step = 1,
+                        value_hold_step = 5,
+                        title_text = _("Brightness when charging"),
+                        info_text = _("Sets brightness to this level when device is charging. Previous brightness is restored when unplugged."),
+                        ok_text = _("Set level"),
+                        callback = function(spin)
+                            usb_brightness_level = spin.value
+                            G_reader_settings:saveSetting("brightness_tweaks_usb_level", usb_brightness_level)
+                            touchmenu_instance:updateItems()
                         end,
-                        callback = function()
-                            usb_brightness_enabled = not usb_brightness_enabled
-                            G_reader_settings:saveSetting("brightness_tweaks_usb_enabled", usb_brightness_enabled)
-                            if usb_brightness_enabled then
-                                startPolling()
-                            else
-                                stopPolling()
-                            end
-                        end,
-                    },
-                    {
-                        text = _("Charging brightness level"),
-                        keep_menu_open = true,
-                        enabled_func = function()
-                            return usb_brightness_enabled
-                        end,
-                        callback = function(touchmenu_instance)
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local spin_widget = SpinWidget:new{
-                                value = usb_brightness_level,
-                                value_min = 0,
-                                value_max = 100,
-                                value_step = 1,
-                                value_hold_step = 5,
-                                title_text = _("Brightness when charging"),
-                                info_text = _("Sets brightness to this level when device is charging. Previous brightness is restored when unplugged."),
-                                ok_text = _("Set level"),
-                                callback = function(spin)
-                                    usb_brightness_level = spin.value
-                                    G_reader_settings:saveSetting("brightness_tweaks_usb_level", usb_brightness_level)
-                                    touchmenu_instance:updateItems()
-                                end,
-                            }
-                            UIManager:show(spin_widget)
-                        end,
-                    },
-                },
+                    }
+                    UIManager:show(spin_widget)
+                end,
             },
         },
     }
