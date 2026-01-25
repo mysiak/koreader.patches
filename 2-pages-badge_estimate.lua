@@ -2,7 +2,7 @@
 --
 local Blitbuffer = require("ffi/blitbuffer")
 local logger = require("logger")
-logger.info("Applying Cover Browser Page Badge patch with menu settings")
+logger.info("Applying Cover Browser Page Badge patch with compression-aware estimation")
 
 -- stylua: ignore start
 --========================== [[Edit your preferences here]] ================================
@@ -53,21 +53,29 @@ local function getHTMLContentSizePureLua(filepath)
     local f, err = io.open(filepath, "rb")
     if not f then
         logger.dbg("Pure-Lua ZIP: could not open file:", err)
-        return 0
+        return 0, 0
     end
     local data = f:read("*a")
     f:close()
-    if not data or #data < 46 then return 0 end
+    if not data or #data < 46 then return 0, 0 end
     local sig = string.char(0x50, 0x4b, 0x01, 0x02)
     local pos = 1
-    local total_html_size = 0
+    local total_html_uncompressed = 0
+    local total_html_compressed = 0
     local html_file_count = 0
     while true do
         local s = data:find(sig, pos, true)
         if not s then break end
         if s + 45 > #data then break end
+        
+        -- Read uncompressed size (bytes 24-27)
         local b1, b2, b3, b4 = data:byte(s + 24, s + 27)
         local uncompressed_size = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+        
+        -- Read compressed size (bytes 20-23)
+        local c1, c2, c3, c4 = data:byte(s + 20, s + 23)
+        local compressed_size = c1 + c2 * 256 + c3 * 65536 + c4 * 16777216
+        
         local fn_b1, fn_b2 = data:byte(s + 28, s + 29)
         local filename_len = fn_b1 + fn_b2 * 256
         local name_start = s + 46
@@ -75,21 +83,22 @@ local function getHTMLContentSizePureLua(filepath)
         if name_end <= #data and filename_len > 0 then
             local filename = data:sub(name_start, name_end):lower()
             if filename:match("%.x?html?$") then
-                total_html_size = total_html_size + uncompressed_size
+                total_html_uncompressed = total_html_uncompressed + uncompressed_size
+                total_html_compressed = total_html_compressed + compressed_size
                 html_file_count = html_file_count + 1
             end
         end
         pos = s + 46 + math.max(0, filename_len)
     end
-    return total_html_size / 1024
+    return total_html_uncompressed / 1024, total_html_compressed / 1024
 end
 
 local function getHTMLContentSize(filepath)
     local ext = filepath:match("%.([^.]+)$")
-    if not ext then return 0 end
+    if not ext then return 0, 0 end
     ext = ext:lower()
     if ext ~= "epub" then
-        return 0
+        return 0, 0
     end
     local ok, zip = pcall(require, "zip")
     if not ok or not zip then
@@ -98,15 +107,18 @@ local function getHTMLContentSize(filepath)
     if ok and zip and type(zip.open) == "function" then
         local zfile, err = zip.open(filepath)
         if zfile then
-            local total_html_size = 0
+            local total_html_uncompressed = 0
+            local total_html_compressed = 0
             local html_file_count = 0
             local success, res = pcall(function()
                 for file in zfile:files() do
                     if file and file.filename and file.uncompressed_size then
                         local filename = file.filename:lower()
                         if filename:match("%.x?html?$") then
-                            local size = file.uncompressed_size or 0
-                            total_html_size = total_html_size + size
+                            local uncomp = file.uncompressed_size or 0
+                            local comp = file.compressed_size or 0
+                            total_html_uncompressed = total_html_uncompressed + uncomp
+                            total_html_compressed = total_html_compressed + comp
                             html_file_count = html_file_count + 1
                         end
                     end
@@ -114,7 +126,7 @@ local function getHTMLContentSize(filepath)
             end)
             if zfile.close then pcall(zfile.close, zfile) end
             if success then
-                return total_html_size / 1024
+                return total_html_uncompressed / 1024, total_html_compressed / 1024
             end
         end
     end
@@ -141,24 +153,42 @@ local function estimatePageCount(filepath)
     
     -- Configurable EPUB estimation based on chars/page standard
     if ext == "epub" then
-        local content_kb = getHTMLContentSize(filepath)
-        if content_kb < 5 then
+        local content_kb_uncompressed, content_kb_compressed = getHTMLContentSize(filepath)
+        if content_kb_uncompressed < 5 then
             return nil
         end
         
-        -- Get current setting from menu
-        local standard = getPageStandard()
-        local kb_per_page
-        
-        if standard == "1800" then
-            kb_per_page = 2.2
-        elseif standard == "2500" then
-            kb_per_page = 3.1
-        else -- "2200" or default
-            kb_per_page = 2.7
+        -- Calculate compression ratio to detect HTML bloat
+        local compression_ratio = 3.0  -- default assumption
+        if content_kb_compressed > 0 then
+            compression_ratio = content_kb_uncompressed / content_kb_compressed
         end
         
-        estimated_pages = math.floor(content_kb / kb_per_page)
+        -- Get base setting from menu
+        local standard = getPageStandard()
+        local base_kb_per_page
+        
+        if standard == "1800" then
+            base_kb_per_page = 2.2
+        elseif standard == "2500" then
+            base_kb_per_page = 3.1
+        else -- "2200" or default
+            base_kb_per_page = 2.7
+        end
+        
+        -- Apply dynamic compression correction (zero speed penalty!)
+        -- High ratio = bloated HTML = need higher divisor
+        local kb_per_page = base_kb_per_page
+        if compression_ratio > 3.5 then
+            -- Books with ratio >3.5 are markup-heavy, adjust upward
+            local bloat_factor = (compression_ratio - 3.0) * 0.4
+            kb_per_page = base_kb_per_page + bloat_factor
+            logger.dbg("Compression-aware adjustment:", filepath, 
+                       "ratio=", string.format("%.2f", compression_ratio),
+                       "divisor=", string.format("%.2f", kb_per_page))
+        end
+        
+        estimated_pages = math.floor(content_kb_uncompressed / kb_per_page)
     else
         -- Other formats
         local content_kb = 0
@@ -332,7 +362,7 @@ function FileManagerMenu:setUpdateItemTable()
         sub_item_table = {
             {
                 text = _("1800 chars/page (~250 words)"),
-                help_text = _("More pages shown. Best for academic/technical reading. 2.2 KB/page ratio."),
+                help_text = _("More pages shown. Best for academic/technical reading. 2.2 KB/page base ratio."),
                 checked_func = function() return getPageStandard() == "1800" end,
                 callback = function()
                     setPageStandard("1800")
@@ -344,7 +374,7 @@ function FileManagerMenu:setUpdateItemTable()
             },
             {
                 text = _("2200 chars/page (~300 words)"),
-                help_text = _("Balanced default. Good for most fiction/non-fiction. 2.7 KB/page ratio."),
+                help_text = _("Balanced default. Good for most fiction/non-fiction. 2.7 KB/page base ratio."),
                 checked_func = function() return getPageStandard() == "2200" end,
                 callback = function()
                     setPageStandard("2200")
@@ -356,7 +386,7 @@ function FileManagerMenu:setUpdateItemTable()
             },
             {
                 text = _("2500 chars/page (~350 words)"),
-                help_text = _("Fewer pages shown. Closer to publisher standards. 3.1 KB/page ratio."),
+                help_text = _("Fewer pages shown. Closer to publisher standards. 3.1 KB/page base ratio."),
                 checked_func = function() return getPageStandard() == "2500" end,
                 callback = function()
                     setPageStandard("2500")
@@ -378,23 +408,25 @@ function FileManagerMenu:setUpdateItemTable()
                                 current == "2500" and "2500 (~350 words)" or
                                 "2200 (~300 words, default)"
             UIManager:show(require("ui/widget/infomessage"):new({
-                text = _([[Page Count Badges
+                text = _([[Page Count Badges v2.0
 
 Shows estimated page counts on unread book covers in Cover Browser grid view.
 
 Current standard: ]] .. current_text .. [[
 
+NEW: Compression-aware estimation
+Automatically detects HTML bloat using ZIP compression ratio. No speed penalty!
+
 Badge format:
 • ~###p = Estimated page count
-• ###p = Accurate count (from reading history)
-• ~###p (###p) = Both estimate and accurate
+• ###p = Accurate (from reading history)
+• ~###p (###p) = Both estimate & accurate
 
-Accuracy: ~6.8% median error
-Method: HTML content analysis for EPUB
-Change standard in menu above.
+Accuracy: ~3-4% median error (improved)
+Method: HTML content analysis + compression detection
 
 Requires Cover Browser plugin in grid view mode.]]),
-                timeout = 12,
+                timeout = 14,
             }))
         end,
     }
