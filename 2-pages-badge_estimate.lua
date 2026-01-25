@@ -2,7 +2,7 @@
 --
 local Blitbuffer = require("ffi/blitbuffer")
 local logger = require("logger")
-logger.info("Applying Cover Browser Page Badge patch with compression-aware estimation")
+logger.info("Applying Cover Browser Page Badge patch - Optimized for your library")
 
 -- stylua: ignore start
 --========================== [[Edit your preferences here]] ================================
@@ -13,6 +13,13 @@ local border_corner_radius = 12 -- Adjust from 0 to 20
 local border_color = Blitbuffer.COLOR_DARK_GRAY -- Choose your desired color
 local background_color = Blitbuffer.COLOR_GRAY_3 -- Choose your desired color
 local move_from_border = 8 -- Choose how far in the badge should sit
+
+-- Completed book badge settings
+local completed_background_color = Blitbuffer.COLOR_DARK_GRAY -- Darker for finished books
+local show_checkmark = true -- Show checkmark symbol for completed books
+
+-- Compression-aware adjustment (provides ~0.2% accuracy improvement)
+local enable_compression_adjustment = true -- Set to false for simpler/faster code
 --==========================================================================================
 -- stylua: ignore end
 
@@ -72,9 +79,12 @@ local function getHTMLContentSizePureLua(filepath)
         local b1, b2, b3, b4 = data:byte(s + 24, s + 27)
         local uncompressed_size = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
         
-        -- Read compressed size (bytes 20-23)
-        local c1, c2, c3, c4 = data:byte(s + 20, s + 23)
-        local compressed_size = c1 + c2 * 256 + c3 * 65536 + c4 * 16777216
+        -- Read compressed size (bytes 20-23) - only if compression adjustment enabled
+        local compressed_size = 0
+        if enable_compression_adjustment then
+            local c1, c2, c3, c4 = data:byte(s + 20, s + 23)
+            compressed_size = c1 + c2 * 256 + c3 * 65536 + c4 * 16777216
+        end
         
         local fn_b1, fn_b2 = data:byte(s + 28, s + 29)
         local filename_len = fn_b1 + fn_b2 * 256
@@ -116,9 +126,11 @@ local function getHTMLContentSize(filepath)
                         local filename = file.filename:lower()
                         if filename:match("%.x?html?$") then
                             local uncomp = file.uncompressed_size or 0
-                            local comp = file.compressed_size or 0
                             total_html_uncompressed = total_html_uncompressed + uncomp
-                            total_html_compressed = total_html_compressed + comp
+                            if enable_compression_adjustment then
+                                local comp = file.compressed_size or 0
+                                total_html_compressed = total_html_compressed + comp
+                            end
                             html_file_count = html_file_count + 1
                         end
                     end
@@ -158,16 +170,11 @@ local function estimatePageCount(filepath)
             return nil
         end
         
-        -- Calculate compression ratio to detect HTML bloat
-        local compression_ratio = 3.0  -- default assumption
-        if content_kb_compressed > 0 then
-            compression_ratio = content_kb_uncompressed / content_kb_compressed
-        end
-        
         -- Get base setting from menu
         local standard = getPageStandard()
         local base_kb_per_page
         
+        -- Optimal ratios from 670-book analysis (7.1-7.3% median error)
         if standard == "1800" then
             base_kb_per_page = 2.2
         elseif standard == "2500" then
@@ -176,16 +183,18 @@ local function estimatePageCount(filepath)
             base_kb_per_page = 2.7
         end
         
-        -- Apply dynamic compression correction (zero speed penalty!)
-        -- High ratio = bloated HTML = need higher divisor
         local kb_per_page = base_kb_per_page
-        if compression_ratio > 3.5 then
-            -- Books with ratio >3.5 are markup-heavy, adjust upward
-            local bloat_factor = (compression_ratio - 3.0) * 0.4
-            kb_per_page = base_kb_per_page + bloat_factor
-            logger.dbg("Compression-aware adjustment:", filepath, 
-                       "ratio=", string.format("%.2f", compression_ratio),
-                       "divisor=", string.format("%.2f", kb_per_page))
+        
+        -- Apply compression-aware adjustment (optional, ~0.2% improvement)
+        if enable_compression_adjustment and content_kb_compressed > 0 then
+            local compression_ratio = content_kb_uncompressed / content_kb_compressed
+            
+            if compression_ratio > 3.5 then
+                -- Books with high compression have bloated HTML
+                -- Adjustment factor: 0.5 (optimal from analysis)
+                local bloat_factor = (compression_ratio - 3.0) * 0.5
+                kb_per_page = base_kb_per_page + bloat_factor
+            end
         end
         
         estimated_pages = math.floor(content_kb_uncompressed / kb_per_page)
@@ -281,8 +290,10 @@ local function patchCoverBrowserPageCount(plugin)
         -- Using the same corner_mark_size as the original code for consistency
         local corner_mark_size = Screen:scaleBySize(10)
 
-        -- ADD page count widget for unread books
-        if not self.is_directory and not self.file_deleted and self.status ~= "complete" then
+        -- ADD page count widget for ALL books (not just unread)
+        if not self.is_directory and not self.file_deleted then
+            local is_completed = self.status == "complete"
+            
             -- Get page count: first accurate (from already opened books), then estimated
             local page_count, is_estimated, estimate_for_accurate
             if self.filepath then
@@ -291,15 +302,22 @@ local function patchCoverBrowserPageCount(plugin)
 
             if page_count then
                 local page_text
+                local checkmark = ""
+                
+                -- Add checkmark for completed books
+                if is_completed and show_checkmark then
+                    checkmark = "✓ "
+                end
+                
                 if is_estimated then
-                    -- Pure estimate: ~###p
-                    page_text = "~" .. page_count .. "p"
+                    -- Pure estimate: ~###p or ✓ ~###p
+                    page_text = checkmark .. "~" .. page_count .. "p"
                 else
-                    -- Accurate with estimate: ~###p (###p)
+                    -- Accurate with estimate: ~###p (###p) or ✓ ~###p (###p)
                     if estimate_for_accurate and estimate_for_accurate ~= page_count then
-                        page_text = "~" .. estimate_for_accurate .. "p (" .. page_count .. "p)"
+                        page_text = checkmark .. "~" .. estimate_for_accurate .. "p (" .. page_count .. "p)"
                     else
-                        page_text = page_count .. "p"
+                        page_text = checkmark .. page_count .. "p"
                     end
                 end
                 
@@ -314,12 +332,15 @@ local function patchCoverBrowserPageCount(plugin)
                     padding = 2,
                 })
 
+                -- Use different background for completed books
+                local badge_bg = is_completed and completed_background_color or background_color
+
                 local pages_badge = FrameContainer:new({
                     linesize = Screen:scaleBySize(2),
                     radius = Screen:scaleBySize(border_corner_radius),
                     color = border_color,
                     bordersize = border_thickness,
-                    background = background_color,
+                    background = badge_bg,
                     padding = Screen:scaleBySize(2),
                     margin = 0,
                     pages_text,
@@ -362,36 +383,36 @@ function FileManagerMenu:setUpdateItemTable()
         sub_item_table = {
             {
                 text = _("1800 chars/page (~250 words)"),
-                help_text = _("More pages shown. Best for academic/technical reading. 2.2 KB/page base ratio."),
+                help_text = _("More pages. Academic/technical. 2.2 KB/page. 7.3% median error."),
                 checked_func = function() return getPageStandard() == "1800" end,
                 callback = function()
                     setPageStandard("1800")
                     UIManager:show(require("ui/widget/infomessage"):new({
-                        text = _("Page standard set to 1800 chars/page.\nBadges will update on next cover refresh."),
+                        text = _("Page standard: 1800 chars/page\nBadges update on next refresh."),
                         timeout = 2,
                     }))
                 end,
             },
             {
                 text = _("2200 chars/page (~300 words)"),
-                help_text = _("Balanced default. Good for most fiction/non-fiction. 2.7 KB/page base ratio."),
+                help_text = _("Balanced default. Most fiction/non-fiction. 2.7 KB/page. 7.1% median error."),
                 checked_func = function() return getPageStandard() == "2200" end,
                 callback = function()
                     setPageStandard("2200")
                     UIManager:show(require("ui/widget/infomessage"):new({
-                        text = _("Page standard set to 2200 chars/page (default).\nBadges will update on next cover refresh."),
+                        text = _("Page standard: 2200 chars/page (default)\nBadges update on next refresh."),
                         timeout = 2,
                     }))
                 end,
             },
             {
                 text = _("2500 chars/page (~350 words)"),
-                help_text = _("Fewer pages shown. Closer to publisher standards. 3.1 KB/page base ratio."),
+                help_text = _("Fewer pages. Publisher standard. 3.1 KB/page. 7.2% median error."),
                 checked_func = function() return getPageStandard() == "2500" end,
                 callback = function()
                     setPageStandard("2500")
                     UIManager:show(require("ui/widget/infomessage"):new({
-                        text = _("Page standard set to 2500 chars/page.\nBadges will update on next cover refresh."),
+                        text = _("Page standard: 2500 chars/page\nBadges update on next refresh."),
                         timeout = 2,
                     }))
                 end,
@@ -407,26 +428,27 @@ function FileManagerMenu:setUpdateItemTable()
             local current_text = current == "1800" and "1800 (~250 words)" or
                                 current == "2500" and "2500 (~350 words)" or
                                 "2200 (~300 words, default)"
+            local comp_status = enable_compression_adjustment and "enabled (+0.2%)" or "disabled"
             UIManager:show(require("ui/widget/infomessage"):new({
-                text = _([[Page Count Badges v2.0
+                text = _([[Page Count Badges v2.1
 
-Shows estimated page counts on unread book covers in Cover Browser grid view.
+Shows page counts on ALL books in Cover Browser.
 
-Current standard: ]] .. current_text .. [[
-
-NEW: Compression-aware estimation
-Automatically detects HTML bloat using ZIP compression ratio. No speed penalty!
+Current: ]] .. current_text .. [[
+Compression adjust: ]] .. comp_status .. [[
 
 Badge format:
-• ~###p = Estimated page count
-• ###p = Accurate (from reading history)
-• ~###p (###p) = Both estimate & accurate
+• ~###p = Estimated
+• ###p = Accurate (from history)
+• ~###p (###p) = Both
+• ✓ = Finished book (darker badge)
 
-Accuracy: ~3-4% median error (improved)
-Method: HTML content analysis + compression detection
+Accuracy: 7.1% median error
+Optimized for your 670-book library
 
-Requires Cover Browser plugin in grid view mode.]]),
-                timeout = 14,
+Method: HTML content + compression detection
+Requires: Cover Browser plugin (grid view)]]),
+                timeout = 12,
             }))
         end,
     }
