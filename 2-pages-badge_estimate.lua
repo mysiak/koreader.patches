@@ -1,11 +1,59 @@
---[[ User patch for KOReader to add page count badges for unread books ]]
---
+--[[ User patch for KOReader to add page count badges for unread books
+
+Inspired by patch https://github.com/SeriousHornet/KOReader.patches/blob/main/2-pages-badge.lua
+and Project title page numbers https://github.com/joshuacant/ProjectTitle
+
+Programmed with AI (Github Copilot, Perplexity)
+
+================================================================================
+Page Count Badge Estimator for KOReader Cover Browser
+================================================================================
+
+WHAT IT DOES:
+Displays estimated page counts as badges on book covers in Cover Browser grid
+view. Shows both estimated and accurate counts (from reading history).
+
+HOW IT WORKS:
+
+1. Fast HTML Content Analysis (2-3 seconds for folder of 100+ books)
+   - Opens EPUB as ZIP, reads central directory only (no decompression)
+   - Sums uncompressed sizes of all HTML/XHTML files
+   - Ignores images, fonts, CSS (actual content only)
+
+2. Optimal KB/Page Ratios (from analysis of your library)
+   - 1800 chars/page (~250 words): KB/page ratio configured below
+   - 2200 chars/page (~300 words): KB/page ratio configured below ★ default
+   - 2500 chars/page (~350 words): KB/page ratio configured below
+   
+3. Compression-Aware Adjustment (optional)
+   - Reads compressed size from ZIP headers (already loaded, zero cost)
+   - High compression ratio = bloated HTML with excessive markup
+   - Formula: if ratio > threshold then divisor += (ratio - baseline) × factor
+   - Prevents over-estimation for markup-heavy books
+
+4. Badge Display Logic
+   - Unread books: Light gray background
+   - Finished books: Dark gray + checkmark ✓
+   - Format: ~250p (estimate) or 250p (accurate from history)
+
+MENU:
+File Manager → File manager settings → "Page count standard" to switch between standards
+
+REQUIREMENTS:
+- Cover Browser or Project title plugin enabled
+- Grid/mosaic view mode
+
+================================================================================
+]]--
+
 local Blitbuffer = require("ffi/blitbuffer")
 local logger = require("logger")
 logger.info("Applying Cover Browser Page Badge patch - Optimized for your library")
 
 -- stylua: ignore start
 --========================== [[Edit your preferences here]] ================================
+
+-- Visual appearance settings
 local page_font_size = 0.95 -- Adjust from 0 to 1
 local page_text_color = Blitbuffer.COLOR_WHITE -- Choose your desired color
 local border_thickness = 2 -- Adjust from 0 to 5
@@ -18,8 +66,41 @@ local move_from_border = 8 -- Choose how far in the badge should sit
 local completed_background_color = Blitbuffer.COLOR_DARK_GRAY -- Darker for finished books
 local show_checkmark = true -- Show checkmark symbol for completed books
 
--- Compression-aware adjustment (provides ~0.2% accuracy improvement)
-local enable_compression_adjustment = true -- Set to false for simpler/faster code
+--==========================================================================================
+-- CALIBRATION PARAMETERS (Update these from Python script recommendations)
+--==========================================================================================
+
+-- Base KB/page ratios for each character-per-page standard
+-- Run the Python analyzer script and copy values from "FINAL RECOMMENDATIONS" section
+local RATIO_1800_CHARS = 2.2  -- Default: 2.2 KB/page for 1800 chars/page (~250 words)
+local RATIO_2200_CHARS = 2.7  -- Default: 2.7 KB/page for 2200 chars/page (~300 words) ★
+local RATIO_2500_CHARS = 3.1  -- Default: 3.1 KB/page for 2500 chars/page (~350 words)
+
+-- Compression-aware adjustment settings
+-- Set to false to disable compression adjustment entirely
+local ENABLE_COMPRESSION = true
+
+-- Compression ratio threshold (apply adjustment only when ratio exceeds this)
+-- Default: 3.5 (books with ratio > 3.5 are considered bloated)
+local COMPRESSION_THRESHOLD = 3.5
+
+-- Compression baseline for calculation (subtract this before multiplying by factor)
+-- Default: 3.0 (neutral point for markup verbosity)
+local COMPRESSION_BASELINE = 3.0
+
+-- Compression adjustment factor (multiplier for bloat calculation)
+-- Higher value = stronger correction for bloated HTML
+-- Python script will recommend optimal value in "COMPRESSION-AWARE ENHANCEMENT" section
+-- Default: 0.5
+local COMPRESSION_FACTOR = 0.5
+
+-- Expected accuracy (for reference only, displayed in About dialog)
+-- Update these from Python script output
+local ACCURACY_MEDIAN_ERROR = 7.1  -- Median error percentage
+local ACCURACY_WITHIN_10PCT = 63   -- Percentage of books within ±10% error
+local ACCURACY_WITHIN_15PCT = 78   -- Percentage of books within ±15% error
+local COMPRESSION_IMPROVEMENT = 0.2 -- Percentage improvement from compression adjustment
+
 --==========================================================================================
 -- stylua: ignore end
 
@@ -81,7 +162,7 @@ local function getHTMLContentSizePureLua(filepath)
         
         -- Read compressed size (bytes 20-23) - only if compression adjustment enabled
         local compressed_size = 0
-        if enable_compression_adjustment then
+        if ENABLE_COMPRESSION then
             local c1, c2, c3, c4 = data:byte(s + 20, s + 23)
             compressed_size = c1 + c2 * 256 + c3 * 65536 + c4 * 16777216
         end
@@ -127,7 +208,7 @@ local function getHTMLContentSize(filepath)
                         if filename:match("%.x?html?$") then
                             local uncomp = file.uncompressed_size or 0
                             total_html_uncompressed = total_html_uncompressed + uncomp
-                            if enable_compression_adjustment then
+                            if ENABLE_COMPRESSION then
                                 local comp = file.compressed_size or 0
                                 total_html_compressed = total_html_compressed + comp
                             end
@@ -170,36 +251,34 @@ local function estimatePageCount(filepath)
             return nil
         end
         
-        -- Get base setting from menu
+        -- Get base ratio from calibration parameters
         local standard = getPageStandard()
         local base_kb_per_page
         
-        -- Optimal ratios from 670-book analysis (7.1-7.3% median error)
         if standard == "1800" then
-            base_kb_per_page = 2.2
+            base_kb_per_page = RATIO_1800_CHARS
         elseif standard == "2500" then
-            base_kb_per_page = 3.1
+            base_kb_per_page = RATIO_2500_CHARS
         else -- "2200" or default
-            base_kb_per_page = 2.7
+            base_kb_per_page = RATIO_2200_CHARS
         end
         
         local kb_per_page = base_kb_per_page
         
-        -- Apply compression-aware adjustment (optional, ~0.2% improvement)
-        if enable_compression_adjustment and content_kb_compressed > 0 then
+        -- Apply compression-aware adjustment (if enabled)
+        if ENABLE_COMPRESSION and content_kb_compressed > 0 then
             local compression_ratio = content_kb_uncompressed / content_kb_compressed
             
-            if compression_ratio > 3.5 then
+            if compression_ratio > COMPRESSION_THRESHOLD then
                 -- Books with high compression have bloated HTML
-                -- Adjustment factor: 0.5 (optimal from analysis)
-                local bloat_factor = (compression_ratio - 3.0) * 0.5
+                local bloat_factor = (compression_ratio - COMPRESSION_BASELINE) * COMPRESSION_FACTOR
                 kb_per_page = base_kb_per_page + bloat_factor
             end
         end
         
         estimated_pages = math.floor(content_kb_uncompressed / kb_per_page)
     else
-        -- Other formats
+        -- Other formats (simplified estimation)
         local content_kb = 0
         if ext == "mobi" or ext == "azw3" then
             content_kb = size_kb * 0.60
@@ -383,7 +462,7 @@ function FileManagerMenu:setUpdateItemTable()
         sub_item_table = {
             {
                 text = _("1800 chars/page (~250 words)"),
-                help_text = _("More pages. Academic/technical. 2.2 KB/page. 7.3% median error."),
+                help_text = _("More pages. Academic/technical. " .. RATIO_1800_CHARS .. " KB/page ratio."),
                 checked_func = function() return getPageStandard() == "1800" end,
                 callback = function()
                     setPageStandard("1800")
@@ -395,7 +474,7 @@ function FileManagerMenu:setUpdateItemTable()
             },
             {
                 text = _("2200 chars/page (~300 words)"),
-                help_text = _("Balanced default. Most fiction/non-fiction. 2.7 KB/page. 7.1% median error."),
+                help_text = _("Balanced default. Most fiction/non-fiction. " .. RATIO_2200_CHARS .. " KB/page ratio."),
                 checked_func = function() return getPageStandard() == "2200" end,
                 callback = function()
                     setPageStandard("2200")
@@ -407,7 +486,7 @@ function FileManagerMenu:setUpdateItemTable()
             },
             {
                 text = _("2500 chars/page (~350 words)"),
-                help_text = _("Fewer pages. Publisher standard. 3.1 KB/page. 7.2% median error."),
+                help_text = _("Fewer pages. Publisher standard. " .. RATIO_2500_CHARS .. " KB/page ratio."),
                 checked_func = function() return getPageStandard() == "2500" end,
                 callback = function()
                     setPageStandard("2500")
@@ -428,14 +507,14 @@ function FileManagerMenu:setUpdateItemTable()
             local current_text = current == "1800" and "1800 (~250 words)" or
                                 current == "2500" and "2500 (~350 words)" or
                                 "2200 (~300 words, default)"
-            local comp_status = enable_compression_adjustment and "enabled (+0.2%)" or "disabled"
+            local comp_status = ENABLE_COMPRESSION and string.format("enabled (+%.1f%%)", COMPRESSION_IMPROVEMENT) or "disabled"
             UIManager:show(require("ui/widget/infomessage"):new({
-                text = _([[Page Count Badges v2.1
-
-Shows page counts on ALL books in Cover Browser.
+                text = _([[Shows page counts on all books in Cover Browser.
 
 Current: ]] .. current_text .. [[
+
 Compression adjust: ]] .. comp_status .. [[
+
 
 Badge format:
 • ~###p = Estimated
@@ -443,12 +522,14 @@ Badge format:
 • ~###p (###p) = Both
 • ✓ = Finished book (darker badge)
 
-Accuracy: 7.1% median error
-Optimized for your 670-book library
+Accuracy: 
+]] .. string.format("%.1f%% median error", ACCURACY_MEDIAN_ERROR) .. 
+[[
 
-Method: HTML content + compression detection
-Requires: Cover Browser plugin (grid view)]]),
-                timeout = 12,
+Within ±10%: ]] .. ACCURACY_WITHIN_10PCT .. [[%
+Within ±15%: ]] .. ACCURACY_WITHIN_15PCT .. [[%
+]]),
+                timeout = 14,
             }))
         end,
     }
