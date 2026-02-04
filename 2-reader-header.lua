@@ -93,6 +93,7 @@ local header_defaults = {
     hide_icons = {},
     wifi_on_only = false,
     title_max_width = 100,
+    author_max_count = 2,
     header_opacity = 100,
     background_opacity = 70,
     background_enabled = false,
@@ -126,6 +127,7 @@ local function getHeaderSettings()
     if settings.hide_icons == nil then settings.hide_icons = {} end
     if settings.wifi_on_only == nil then settings.wifi_on_only = false end
     if settings.title_max_width == nil then settings.title_max_width = 100 end
+    if settings.author_max_count == nil then settings.author_max_count = 2 end
     if settings.header_opacity == nil then settings.header_opacity = 100 end
     if settings.background_opacity == nil then settings.background_opacity = 70 end
     if settings.background_enabled == nil then settings.background_enabled = false end
@@ -153,6 +155,7 @@ local function getHeaderSettings()
         hide_icons = true,
         wifi_on_only = true,
         title_max_width = true,
+        author_max_count = true,
         header_opacity = true,
         background_opacity = true,
         background_enabled = true,
@@ -369,7 +372,21 @@ local function generate_author(self, h_settings)
     if self.ui.doc_props then
         local author = self.ui.doc_props.authors or ""
         if author:find("\n") then
-            author = T(_("%%1 et al."), util.splitToArray(author, "\n")[1])
+            local authors_list = util.splitToArray(author, "\n")
+            local nb_authors = #authors_list
+            local max_count = h_settings.author_max_count or 2
+            
+            if nb_authors <= max_count then
+                -- Display all authors separated by comma
+                author = table.concat(authors_list, ", ")
+            else
+                -- More authors than limit: show first ones and use "et al."
+                local displayed_authors = {}
+                for i = 1, max_count do
+                    table.insert(displayed_authors, authors_list[i])
+                end
+                author = table.concat(displayed_authors, ", ") .. " et al."
+            end
         end
         return author
     end
@@ -1371,13 +1388,13 @@ Examples:
                             },
                         })  
                     else
-                        -- Check if item has icon/bracket that can be toggled
+                        -- Check if item has icon/bracket that can be toggled or special settings
                         local has_toggle = (key == "time" or key == "battery" or 
                                            key == "percentage" or key == "pages_left_book" or 
                                            key == "pages_left" or key == "chapter_progress" or 
                                            key == "book_time_to_read" or key == "chapter_time_to_read" or 
                                            key == "frontlight" or key == "frontlight_warmth" or 
-                                           key == "mem_usage" or key == "bookmark_count" or key == "title")
+                                           key == "mem_usage" or key == "bookmark_count" or key == "title" or key == "author")
                         
                         if has_toggle then
                             -- Item with icon/bracket - add submenu
@@ -1450,6 +1467,40 @@ Examples:
                                             ok_text = _("Set width"),
                                             callback = function(spin)
                                                 h_settings.title_max_width = spin.value
+                                                saveHeaderSettings(h_settings)
+                                                touchmenu_instance:updateItems()
+                                                if self.ui and self.ui.document then
+                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                end
+                                            end,
+                                        }
+                                        UIManager:show(spin_widget)
+                                    end,
+                                    keep_menu_open = true,
+                                })
+                            end
+                            
+                            -- Add author-specific options
+                            if key == "author" then
+                                table.insert(sub_items, {
+                                    text_func = function()
+                                        local h_settings = getHeaderSettings()
+                                        return T(_("Max authors: %1"), h_settings.author_max_count or 2)
+                                    end,
+                                    callback = function(touchmenu_instance)
+                                        local h_settings = getHeaderSettings()
+                                        local SpinWidget = require("ui/widget/spinwidget")
+                                        local spin_widget = SpinWidget:new{
+                                            value = h_settings.author_max_count or 2,
+                                            value_min = 1,
+                                            value_max = 10,
+                                            value_step = 1,
+                                            value_hold_step = 1,
+                                            title_text = _("Maximum number of authors to display"),
+                                            info_text = _("If the book has more authors than this number, the rest will be replaced with 'et al.'"),
+                                            ok_text = _("Set count"),
+                                            callback = function(spin)
+                                                h_settings.author_max_count = spin.value
                                                 saveHeaderSettings(h_settings)
                                                 touchmenu_instance:updateItems()
                                                 if self.ui and self.ui.document then
