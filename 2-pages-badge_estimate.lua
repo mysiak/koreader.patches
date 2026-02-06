@@ -134,6 +134,18 @@ local function setPageStandard(standard)
     G_reader_settings:flush()
 end
 
+local function getHideRenderedPages()
+    local settings = G_reader_settings:readSetting(SETTINGS_KEY) or {}
+    return settings.hide_rendered_pages == true
+end
+
+local function setHideRenderedPages(value)
+    local settings = G_reader_settings:readSetting(SETTINGS_KEY) or {}
+    settings.hide_rendered_pages = value
+    G_reader_settings:saveSetting(SETTINGS_KEY, settings)
+    G_reader_settings:flush()
+end
+
 --------------------------------------------------------------------------------
 -- Page Count Estimation Functions
 --------------------------------------------------------------------------------
@@ -393,8 +405,15 @@ local function patchCoverBrowserPageCount(plugin)
                     page_text = checkmark .. "~" .. page_count .. "p"
                 else
                     -- Accurate with estimate: ~###p (###p) or ✓ ~###p (###p)
+                    local hide_rendered = getHideRenderedPages()
                     if estimate_for_accurate and estimate_for_accurate ~= page_count then
-                        page_text = checkmark .. "~" .. estimate_for_accurate .. "p (" .. page_count .. "p)"
+                        if hide_rendered then
+                            -- Show only estimate when option is enabled
+                            page_text = checkmark .. "~" .. estimate_for_accurate .. "p"
+                        else
+                            -- Show both estimate and rendered (default)
+                            page_text = checkmark .. "~" .. estimate_for_accurate .. "p (" .. page_count .. "p)"
+                        end
                     else
                         page_text = checkmark .. page_count .. "p"
                     end
@@ -452,64 +471,80 @@ local orig_FileManagerMenu_setUpdateItemTable = FileManagerMenu.setUpdateItemTab
 function FileManagerMenu:setUpdateItemTable()
     local UIManager = require("ui/uimanager")
     
-    -- Insert menu items into filemanager settings
-    table.insert(FileManagerMenuOrder.filemanager_settings, "page_count_standard")
-    table.insert(FileManagerMenuOrder.filemanager_settings, "page_count_about")
+    -- Insert menu item into filemanager settings
+    table.insert(FileManagerMenuOrder.filemanager_settings, "page_count_badge")
     
-    -- Page counting standard selector
-    self.menu_items.page_count_standard = {
-        text = _("Page count standard"),
+    -- Page count badge settings (parent menu)
+    self.menu_items.page_count_badge = {
+        text = _("Page count badge"),
         sub_item_table = {
             {
-                text = _("1800 chars/page (~250 words)"),
-                help_text = _("More pages. Academic/technical. " .. RATIO_1800_CHARS .. " KB/page ratio."),
-                checked_func = function() return getPageStandard() == "1800" end,
+                text = _("Page count standard"),
+                sub_item_table = {
+                    {
+                        text = _("1800 chars/page (~250 words)"),
+                        help_text = _("More pages. Academic/technical. " .. RATIO_1800_CHARS .. " KB/page ratio."),
+                        checked_func = function() return getPageStandard() == "1800" end,
+                        callback = function()
+                            setPageStandard("1800")
+                            UIManager:show(require("ui/widget/infomessage"):new({
+                                text = _("Page standard: 1800 chars/page\nBadges update on next refresh."),
+                                timeout = 2,
+                            }))
+                        end,
+                    },
+                    {
+                        text = _("2200 chars/page (~300 words)"),
+                        help_text = _("Balanced default. Most fiction/non-fiction. " .. RATIO_2200_CHARS .. " KB/page ratio."),
+                        checked_func = function() return getPageStandard() == "2200" end,
+                        callback = function()
+                            setPageStandard("2200")
+                            UIManager:show(require("ui/widget/infomessage"):new({
+                                text = _("Page standard: 2200 chars/page (default)\nBadges update on next refresh."),
+                                timeout = 2,
+                            }))
+                        end,
+                    },
+                    {
+                        text = _("2500 chars/page (~350 words)"),
+                        help_text = _("Fewer pages. Publisher standard. " .. RATIO_2500_CHARS .. " KB/page ratio."),
+                        checked_func = function() return getPageStandard() == "2500" end,
+                        callback = function()
+                            setPageStandard("2500")
+                            UIManager:show(require("ui/widget/infomessage"):new({
+                                text = _("Page standard: 2500 chars/page\nBadges update on next refresh."),
+                                timeout = 2,
+                            }))
+                        end,
+                    },
+                },
+            },
+            {
+                text = _("Hide number of rendered pages"),
+                help_text = _("When enabled, shows only estimate ~###p instead of ~###p (###p)"),
+                checked_func = function()
+                    return getHideRenderedPages()
+                end,
                 callback = function()
-                    setPageStandard("1800")
+                    local new_value = not getHideRenderedPages()
+                    setHideRenderedPages(new_value)
+                    local status = new_value and _("enabled") or _("disabled")
                     UIManager:show(require("ui/widget/infomessage"):new({
-                        text = _("Page standard: 1800 chars/page\nBadges update on next refresh."),
+                        text = _("Hide rendered pages: ") .. status .. _("\nBadges update on next refresh."),
                         timeout = 2,
                     }))
                 end,
             },
             {
-                text = _("2200 chars/page (~300 words)"),
-                help_text = _("Balanced default. Most fiction/non-fiction. " .. RATIO_2200_CHARS .. " KB/page ratio."),
-                checked_func = function() return getPageStandard() == "2200" end,
+                text = _("About"),
                 callback = function()
-                    setPageStandard("2200")
+                    local current = getPageStandard()
+                    local current_text = current == "1800" and "1800 (~250 words)" or
+                                        current == "2500" and "2500 (~350 words)" or
+                                        "2200 (~300 words, default)"
+                    local comp_status = ENABLE_COMPRESSION and string.format("enabled (+%.1f%%)", COMPRESSION_IMPROVEMENT) or "disabled"
                     UIManager:show(require("ui/widget/infomessage"):new({
-                        text = _("Page standard: 2200 chars/page (default)\nBadges update on next refresh."),
-                        timeout = 2,
-                    }))
-                end,
-            },
-            {
-                text = _("2500 chars/page (~350 words)"),
-                help_text = _("Fewer pages. Publisher standard. " .. RATIO_2500_CHARS .. " KB/page ratio."),
-                checked_func = function() return getPageStandard() == "2500" end,
-                callback = function()
-                    setPageStandard("2500")
-                    UIManager:show(require("ui/widget/infomessage"):new({
-                        text = _("Page standard: 2500 chars/page\nBadges update on next refresh."),
-                        timeout = 2,
-                    }))
-                end,
-            },
-        },
-    }
-    
-    -- About info
-    self.menu_items.page_count_about = {
-        text = _("About page count badges"),
-        callback = function()
-            local current = getPageStandard()
-            local current_text = current == "1800" and "1800 (~250 words)" or
-                                current == "2500" and "2500 (~350 words)" or
-                                "2200 (~300 words, default)"
-            local comp_status = ENABLE_COMPRESSION and string.format("enabled (+%.1f%%)", COMPRESSION_IMPROVEMENT) or "disabled"
-            UIManager:show(require("ui/widget/infomessage"):new({
-                text = _([[Shows page counts on all books in Cover Browser.
+                        text = _([[Shows page counts on all books in Cover Browser.
 
 Current: ]] .. current_text .. [[
 
@@ -529,9 +564,11 @@ Accuracy:
 Within ±10%: ]] .. ACCURACY_WITHIN_10PCT .. [[%
 Within ±15%: ]] .. ACCURACY_WITHIN_15PCT .. [[%
 ]]),
-                timeout = 14,
-            }))
-        end,
+                        timeout = 14,
+                    }))
+                end,
+            },
+        },
     }
     
     orig_FileManagerMenu_setUpdateItemTable(self)
