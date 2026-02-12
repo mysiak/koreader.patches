@@ -98,6 +98,10 @@ local header_defaults = {
     background_opacity = 70,
     background_enabled = false,
     auto_background_for_pdf = true,
+    -- Progress bar grayscale values (default to nil, will use ProgressWidget defaults)
+    progress_bar_read_color = nil,
+    progress_bar_unread_color = nil,
+    progress_bar_marker_color = nil,
 }
 
 local function getHeaderSettings()
@@ -132,6 +136,10 @@ local function getHeaderSettings()
     if settings.background_opacity == nil then settings.background_opacity = 70 end
     if settings.background_enabled == nil then settings.background_enabled = false end
     if settings.auto_background_for_pdf == nil then settings.auto_background_for_pdf = true end
+    -- Initialize grayscale settings (default to nil = use ProgressWidget defaults)
+    if settings.progress_bar_read_color == nil then settings.progress_bar_read_color = nil end
+    if settings.progress_bar_unread_color == nil then settings.progress_bar_unread_color = nil end
+    if settings.progress_bar_marker_color == nil then settings.progress_bar_marker_color = nil end
     
     -- Clean up unsupported settings - keep only valid keys
     local valid_keys = {
@@ -161,6 +169,9 @@ local function getHeaderSettings()
         background_enabled = true,
         auto_background_for_pdf = true,
         _background_manually_set = true,  -- Internal tracking state
+        progress_bar_read_color = true,
+        progress_bar_unread_color = true,
+        progress_bar_marker_color = true,
     }
     
     local cleaned = false
@@ -185,6 +196,22 @@ end
 
 local function isHeaderEnabled()
     return getHeaderSettings().enabled
+end
+
+-- Helper functions for grayscale management
+local function grayscaleValueToHex(value)
+    -- Convert grayscale value (0-255) to hex color
+    value = math.max(0, math.min(255, value))
+    return string.format("#%02X%02X%02X", value, value, value)
+end
+
+local function getDefaultProgressBarColors()
+    -- Get default grayscale values for ProgressWidget
+    return {
+        read = 85,       -- Dark gray for read portion
+        unread = 170,    -- Light gray for unread portion
+        marker = 0,      -- Black for chapter markers
+    }
 end
 
 local function hasItem(items_list, item_key)
@@ -873,6 +900,17 @@ ReaderView.paintTo = function(self, bb, x, y)
         -- Apply thin style like footer does
         progress_bar:updateStyle(false, progress_bar_height)
         progress_bar.thin_ticks = (chapter_markers ~= "none") -- enable thin ticks if chapter markers enabled
+        
+        -- Apply custom grayscale values if configured
+        local defaults = getDefaultProgressBarColors()
+        local read_color = h_settings.progress_bar_read_color or defaults.read
+        local unread_color = h_settings.progress_bar_unread_color or defaults.unread
+        local marker_color = h_settings.progress_bar_marker_color or defaults.marker
+        
+        -- Apply grayscale values to progress bar
+        progress_bar.fillcolor = Blitbuffer.colorFromString(grayscaleValueToHex(read_color))
+        progress_bar.bgcolor = Blitbuffer.colorFromString(grayscaleValueToHex(unread_color))
+        progress_bar.bordercolor = Blitbuffer.colorFromString(grayscaleValueToHex(marker_color))
         
         -- Add TOC markers (chapter markers) if enabled and in book mode
         if progress_bar_mode == "book" and chapter_markers ~= "none" and self.ui.document and self.ui.document.getToc then
@@ -2160,6 +2198,164 @@ Examples:
                                         UIManager:setDirty(self.ui.dialog, "ui")
                                     end
                                 end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("Progress bar colors"),
+                        enabled_func = function()
+                            local h_settings = getHeaderSettings()
+                            return h_settings.show_progress_bar
+                        end,
+                        sub_item_table = {
+                            {
+                                text_func = function()
+                                    local h_settings = getHeaderSettings()
+                                    local defaults = getDefaultProgressBarColors()
+                                    local gray_val = h_settings.progress_bar_read_color or defaults.read
+                                    return T(_("Read portion: %1"), gray_val)
+                                end,
+                                callback = function(touchmenu_instance)
+                                    local h_settings = getHeaderSettings()
+                                    local defaults = getDefaultProgressBarColors()
+                                    local current_value = h_settings.progress_bar_read_color or defaults.read
+                                    local SpinWidget = require("ui/widget/spinwidget")
+                                    local spin_widget = SpinWidget:new{
+                                        value = current_value,
+                                        value_min = 0,
+                                        value_max = 255,
+                                        value_step = 5,
+                                        value_hold_step = 15,
+                                        title_text = _("Read portion value"),
+                                        info_text = _("0 = black, 255 = white"),
+                                        ok_text = _("Set value"),
+                                        extra_text = _("Reset to default"),
+                                        extra_callback = function()
+                                            h_settings.progress_bar_read_color = nil
+                                            saveHeaderSettings(h_settings)
+                                            touchmenu_instance:updateItems()
+                                            if self.ui and self.ui.document then
+                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                            end
+                                        end,
+                                        callback = function(spin)
+                                            h_settings.progress_bar_read_color = spin.value
+                                            saveHeaderSettings(h_settings)
+                                            touchmenu_instance:updateItems()
+                                            if self.ui and self.ui.document then
+                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                            end
+                                        end,
+                                    }
+                                    UIManager:show(spin_widget)
+                                end,
+                                keep_menu_open = true,
+                            },
+                            {
+                                text_func = function()
+                                    local h_settings = getHeaderSettings()
+                                    local defaults = getDefaultProgressBarColors()
+                                    local gray_val = h_settings.progress_bar_unread_color or defaults.unread
+                                    return T(_("Unread portion: %1"), gray_val)
+                                end,
+                                callback = function(touchmenu_instance)
+                                    local h_settings = getHeaderSettings()
+                                    local defaults = getDefaultProgressBarColors()
+                                    local current_value = h_settings.progress_bar_unread_color or defaults.unread
+                                    local SpinWidget = require("ui/widget/spinwidget")
+                                    local spin_widget = SpinWidget:new{
+                                        value = current_value,
+                                        value_min = 0,
+                                        value_max = 255,
+                                        value_step = 5,
+                                        value_hold_step = 15,
+                                        title_text = _("Unread portion value"),
+                                        info_text = _("0 = black, 255 = white"),
+                                        ok_text = _("Set value"),
+                                        extra_text = _("Reset to default"),
+                                        extra_callback = function()
+                                            h_settings.progress_bar_unread_color = nil
+                                            saveHeaderSettings(h_settings)
+                                            touchmenu_instance:updateItems()
+                                            if self.ui and self.ui.document then
+                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                            end
+                                        end,
+                                        callback = function(spin)
+                                            h_settings.progress_bar_unread_color = spin.value
+                                            saveHeaderSettings(h_settings)
+                                            touchmenu_instance:updateItems()
+                                            if self.ui and self.ui.document then
+                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                            end
+                                        end,
+                                    }
+                                    UIManager:show(spin_widget)
+                                end,
+                                keep_menu_open = true,
+                            },
+                            {
+                                text_func = function()
+                                    local h_settings = getHeaderSettings()
+                                    local defaults = getDefaultProgressBarColors()
+                                    local gray_val = h_settings.progress_bar_marker_color or defaults.marker
+                                    local marker_status = ""
+                                    if h_settings.chapter_markers == "none" or h_settings.progress_bar_mode == "chapter" then
+                                        marker_status = " (" .. _("not shown") .. ")"
+                                    end
+                                    return T(_("Chapter marker: %1%2"), gray_val, marker_status)
+                                end,
+                                callback = function(touchmenu_instance)
+                                    local h_settings = getHeaderSettings()
+                                    local defaults = getDefaultProgressBarColors()
+                                    local current_value = h_settings.progress_bar_marker_color or defaults.marker
+                                    local SpinWidget = require("ui/widget/spinwidget")
+                                    local spin_widget = SpinWidget:new{
+                                        value = current_value,
+                                        value_min = 0,
+                                        value_max = 255,
+                                        value_step = 5,
+                                        value_hold_step = 15,
+                                        title_text = _("Chapter marker value"),
+                                        info_text = _("0 = black, 255 = white"),
+                                        ok_text = _("Set value"),
+                                        extra_text = _("Reset to default"),
+                                        extra_callback = function()
+                                            h_settings.progress_bar_marker_color = nil
+                                            saveHeaderSettings(h_settings)
+                                            touchmenu_instance:updateItems()
+                                            if self.ui and self.ui.document then
+                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                            end
+                                        end,
+                                        callback = function(spin)
+                                            h_settings.progress_bar_marker_color = spin.value
+                                            saveHeaderSettings(h_settings)
+                                            touchmenu_instance:updateItems()
+                                            if self.ui and self.ui.document then
+                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                            end
+                                        end,
+                                    }
+                                    UIManager:show(spin_widget)
+                                end,
+                                keep_menu_open = true,
+                            },
+                            {
+                                text = _("Reset all to default"),
+                                callback = function(touchmenu_instance)
+                                    local h_settings = getHeaderSettings()
+                                    h_settings.progress_bar_read_color = nil
+                                    h_settings.progress_bar_unread_color = nil
+                                    h_settings.progress_bar_marker_color = nil
+                                    saveHeaderSettings(h_settings)
+                                    touchmenu_instance:updateItems()
+                                    if self.ui and self.ui.document then
+                                        UIManager:setDirty(self.ui.dialog, "ui")
+                                    end
+                                end,
+                                keep_menu_open = true,
+                                separator = true,
                             },
                         },
                     },
