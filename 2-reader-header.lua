@@ -98,7 +98,7 @@ local header_defaults = {
     background_opacity = 70,
     background_enabled = false,
     auto_background_for_pdf = true,
-    -- Progress bar grayscale values (default to nil, will use ProgressWidget defaults)
+    -- Progress bar colors stored as hex (default to nil, will use ProgressWidget defaults)
     progress_bar_read_color = nil,
     progress_bar_unread_color = nil,
     progress_bar_marker_color = nil,
@@ -136,7 +136,7 @@ local function getHeaderSettings()
     if settings.background_opacity == nil then settings.background_opacity = 70 end
     if settings.background_enabled == nil then settings.background_enabled = false end
     if settings.auto_background_for_pdf == nil then settings.auto_background_for_pdf = true end
-    -- Initialize grayscale settings (default to nil = use ProgressWidget defaults)
+    -- Initialize color settings (default to nil = use ProgressWidget defaults)
     if settings.progress_bar_read_color == nil then settings.progress_bar_read_color = nil end
     if settings.progress_bar_unread_color == nil then settings.progress_bar_unread_color = nil end
     if settings.progress_bar_marker_color == nil then settings.progress_bar_marker_color = nil end
@@ -198,19 +198,77 @@ local function isHeaderEnabled()
     return getHeaderSettings().enabled
 end
 
--- Helper functions for grayscale management
+-- Helper functions for color management
+local function isColorDevice()
+    -- Check if device supports color display
+    if Device.hasColorScreen then
+        if type(Device.hasColorScreen) == "function" then
+            return Device:hasColorScreen()
+        else
+            return Device.hasColorScreen
+        end
+    end
+    return false
+end
+
+local function validateHexColor(hex)
+    -- Validate hex color format (#RGB or #RRGGBB)
+    if not hex or type(hex) ~= "string" then
+        return false
+    end
+    return hex:match("^#%x%x%x$") or hex:match("^#%x%x%x%x%x%x$")
+end
+
+local function convertToGrayscale(hex)
+    -- Convert hex color to grayscale using luminance formula
+    if not validateHexColor(hex) then
+        return hex
+    end
+    
+    local hex_clean = hex:gsub("#", "")
+    local r, g, b
+    if #hex_clean == 3 then
+        r = tonumber(hex_clean:sub(1, 1), 16) * 17
+        g = tonumber(hex_clean:sub(2, 2), 16) * 17
+        b = tonumber(hex_clean:sub(3, 3), 16) * 17
+    else
+        r = tonumber(hex_clean:sub(1, 2), 16)
+        g = tonumber(hex_clean:sub(3, 4), 16)
+        b = tonumber(hex_clean:sub(5, 6), 16)
+    end
+    
+    -- ITU-R BT.709 luminance formula
+    local gray = math.floor(0.2126 * r + 0.7152 * g + 0.0722 * b)
+    return string.format("#%02X%02X%02X", gray, gray, gray)
+end
+
+local function hexToGrayscaleValue(hex)
+    -- Convert hex color to grayscale value (0-255) for display
+    if not hex or type(hex) ~= "string" then
+        return 128
+    end
+    local hex_clean = hex:gsub("#", "")
+    if #hex_clean >= 2 then
+        return tonumber(hex_clean:sub(1, 2), 16) or 128
+    end
+    return 128
+end
+
 local function grayscaleValueToHex(value)
-    -- Convert grayscale value (0-255) to hex color
-    value = math.max(0, math.min(255, value))
+    -- Convert grayscale value (0-255) to hex color for storage
+    if type(value) ~= "number" then
+        value = 128
+    end
+    value = math.max(0, math.min(255, math.floor(value)))
     return string.format("#%02X%02X%02X", value, value, value)
 end
 
 local function getDefaultProgressBarColors()
-    -- Get default grayscale values for ProgressWidget
+    -- Get default colors as hex for ProgressWidget
     return {
-        read = 85,       -- Dark gray for read portion
-        unread = 170,    -- Light gray for unread portion
-        marker = 0,      -- Black for chapter markers
+        read = "#555555",      -- Dark gray for read portion
+        unread = "#AAAAAA",    -- Light gray for unread portion
+        marker = "#000000",    -- Black for chapter markers
     }
 end
 
@@ -901,16 +959,23 @@ ReaderView.paintTo = function(self, bb, x, y)
         progress_bar:updateStyle(false, progress_bar_height)
         progress_bar.thin_ticks = (chapter_markers ~= "none") -- enable thin ticks if chapter markers enabled
         
-        -- Apply custom grayscale values if configured
+        -- Apply custom colors if configured (convert to grayscale for B/W devices)
         local defaults = getDefaultProgressBarColors()
         local read_color = h_settings.progress_bar_read_color or defaults.read
         local unread_color = h_settings.progress_bar_unread_color or defaults.unread
         local marker_color = h_settings.progress_bar_marker_color or defaults.marker
         
-        -- Apply grayscale values to progress bar
-        progress_bar.fillcolor = Blitbuffer.colorFromString(grayscaleValueToHex(read_color))
-        progress_bar.bgcolor = Blitbuffer.colorFromString(grayscaleValueToHex(unread_color))
-        progress_bar.bordercolor = Blitbuffer.colorFromString(grayscaleValueToHex(marker_color))
+        -- Convert to grayscale for B/W devices
+        if not isColorDevice() then
+            read_color = convertToGrayscale(read_color)
+            unread_color = convertToGrayscale(unread_color)
+            marker_color = convertToGrayscale(marker_color)
+        end
+        
+        -- Apply colors to progress bar (already in hex format)
+        progress_bar.fillcolor = Blitbuffer.colorFromString(read_color)
+        progress_bar.bgcolor = Blitbuffer.colorFromString(unread_color)
+        progress_bar.bordercolor = Blitbuffer.colorFromString(marker_color)
         
         -- Add TOC markers (chapter markers) if enabled and in book mode
         if progress_bar_mode == "book" and chapter_markers ~= "none" and self.ui.document and self.ui.document.getToc then
@@ -2212,42 +2277,107 @@ Examples:
                                 text_func = function()
                                     local h_settings = getHeaderSettings()
                                     local defaults = getDefaultProgressBarColors()
-                                    local gray_val = h_settings.progress_bar_read_color or defaults.read
-                                    return T(_("Read portion: %1"), gray_val)
+                                    local color = h_settings.progress_bar_read_color or defaults.read
+                                    if isColorDevice() then
+                                        return T(_("Read portion: %1"), color)
+                                    else
+                                        local gray_val = hexToGrayscaleValue(color)
+                                        return T(_("Read portion: %1"), gray_val)
+                                    end
                                 end,
                                 callback = function(touchmenu_instance)
                                     local h_settings = getHeaderSettings()
                                     local defaults = getDefaultProgressBarColors()
-                                    local current_value = h_settings.progress_bar_read_color or defaults.read
-                                    local SpinWidget = require("ui/widget/spinwidget")
-                                    local spin_widget = SpinWidget:new{
-                                        value = current_value,
-                                        value_min = 0,
-                                        value_max = 255,
-                                        value_step = 5,
-                                        value_hold_step = 15,
-                                        title_text = _("Read portion value"),
-                                        info_text = _("0 = black, 255 = white"),
-                                        ok_text = _("Set value"),
-                                        extra_text = _("Reset to default"),
-                                        extra_callback = function()
-                                            h_settings.progress_bar_read_color = nil
-                                            saveHeaderSettings(h_settings)
-                                            touchmenu_instance:updateItems()
-                                            if self.ui and self.ui.document then
-                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                            end
-                                        end,
-                                        callback = function(spin)
-                                            h_settings.progress_bar_read_color = spin.value
-                                            saveHeaderSettings(h_settings)
-                                            touchmenu_instance:updateItems()
-                                            if self.ui and self.ui.document then
-                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                            end
-                                        end,
-                                    }
-                                    UIManager:show(spin_widget)
+                                    local current_color = h_settings.progress_bar_read_color or defaults.read
+                                    
+                                    if isColorDevice() then
+                                        -- Color device: use InputDialog for hex color
+                                        local InputDialog = require("ui/widget/inputdialog")
+                                        local input_dialog
+                                        input_dialog = InputDialog:new{
+                                            title = _("Enter hex color for read portion (e.g., #808080)"),
+                                            input = current_color,
+                                            input_hint = "#RRGGBB",
+                                            buttons = {
+                                                {
+                                                    {
+                                                        text = _("Cancel"),
+                                                        callback = function()
+                                                            UIManager:close(input_dialog)
+                                                        end,
+                                                    },
+                                                    {
+                                                        text = _("Reset to default"),
+                                                        callback = function()
+                                                            h_settings.progress_bar_read_color = nil
+                                                            saveHeaderSettings(h_settings)
+                                                            touchmenu_instance:updateItems()
+                                                            if self.ui and self.ui.document then
+                                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                                            end
+                                                            UIManager:close(input_dialog)
+                                                        end,
+                                                    },
+                                                    {
+                                                        text = _("Save"),
+                                                        is_enter_default = true,
+                                                        callback = function()
+                                                            local text = input_dialog:getInputText()
+                                                            if text and text ~= "" then
+                                                                if not validateHexColor(text) then
+                                                                    UIManager:show(require("ui/widget/infomessage"):new{
+                                                                        text = _("Invalid color format. Use #RGB or #RRGGBB."),
+                                                                    })
+                                                                    return
+                                                                end
+                                                                h_settings.progress_bar_read_color = text
+                                                                saveHeaderSettings(h_settings)
+                                                                touchmenu_instance:updateItems()
+                                                                if self.ui and self.ui.document then
+                                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                                end
+                                                                UIManager:close(input_dialog)
+                                                            end
+                                                        end,
+                                                    },
+                                                },
+                                            },
+                                        }
+                                        UIManager:show(input_dialog)
+                                        input_dialog:onShowKeyboard()
+                                    else
+                                        -- B/W device: use SpinWidget for grayscale slider
+                                        local current_value = hexToGrayscaleValue(current_color)
+                                        local SpinWidget = require("ui/widget/spinwidget")
+                                        local spin_widget = SpinWidget:new{
+                                            value = current_value,
+                                            value_min = 0,
+                                            value_max = 255,
+                                            value_step = 5,
+                                            value_hold_step = 15,
+                                            title_text = _("Read portion value"),
+                                            info_text = _("0 = black, 255 = white"),
+                                            ok_text = _("Set value"),
+                                            extra_text = _("Reset to default"),
+                                            extra_callback = function()
+                                                h_settings.progress_bar_read_color = nil
+                                                saveHeaderSettings(h_settings)
+                                                touchmenu_instance:updateItems()
+                                                if self.ui and self.ui.document then
+                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                end
+                                            end,
+                                            callback = function(spin)
+                                                h_settings.progress_bar_read_color = grayscaleValueToHex(spin.value)
+                                                saveHeaderSettings(h_settings)
+                                                touchmenu_instance:updateItems()
+                                                if self.ui and self.ui.document then
+                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                end
+                                            end,
+                                        }
+                                        UIManager:show(spin_widget)
+                                    end
                                 end,
                                 keep_menu_open = true,
                             },
@@ -2255,42 +2385,107 @@ Examples:
                                 text_func = function()
                                     local h_settings = getHeaderSettings()
                                     local defaults = getDefaultProgressBarColors()
-                                    local gray_val = h_settings.progress_bar_unread_color or defaults.unread
-                                    return T(_("Unread portion: %1"), gray_val)
+                                    local color = h_settings.progress_bar_unread_color or defaults.unread
+                                    if isColorDevice() then
+                                        return T(_("Unread portion: %1"), color)
+                                    else
+                                        local gray_val = hexToGrayscaleValue(color)
+                                        return T(_("Unread portion: %1"), gray_val)
+                                    end
                                 end,
                                 callback = function(touchmenu_instance)
                                     local h_settings = getHeaderSettings()
                                     local defaults = getDefaultProgressBarColors()
-                                    local current_value = h_settings.progress_bar_unread_color or defaults.unread
-                                    local SpinWidget = require("ui/widget/spinwidget")
-                                    local spin_widget = SpinWidget:new{
-                                        value = current_value,
-                                        value_min = 0,
-                                        value_max = 255,
-                                        value_step = 5,
-                                        value_hold_step = 15,
-                                        title_text = _("Unread portion value"),
-                                        info_text = _("0 = black, 255 = white"),
-                                        ok_text = _("Set value"),
-                                        extra_text = _("Reset to default"),
-                                        extra_callback = function()
-                                            h_settings.progress_bar_unread_color = nil
-                                            saveHeaderSettings(h_settings)
-                                            touchmenu_instance:updateItems()
-                                            if self.ui and self.ui.document then
-                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                            end
-                                        end,
-                                        callback = function(spin)
-                                            h_settings.progress_bar_unread_color = spin.value
-                                            saveHeaderSettings(h_settings)
-                                            touchmenu_instance:updateItems()
-                                            if self.ui and self.ui.document then
-                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                            end
-                                        end,
-                                    }
-                                    UIManager:show(spin_widget)
+                                    local current_color = h_settings.progress_bar_unread_color or defaults.unread
+                                    
+                                    if isColorDevice() then
+                                        -- Color device: use InputDialog for hex color
+                                        local InputDialog = require("ui/widget/inputdialog")
+                                        local input_dialog
+                                        input_dialog = InputDialog:new{
+                                            title = _("Enter hex color for unread portion (e.g., #C0C0C0)"),
+                                            input = current_color,
+                                            input_hint = "#RRGGBB",
+                                            buttons = {
+                                                {
+                                                    {
+                                                        text = _("Cancel"),
+                                                        callback = function()
+                                                            UIManager:close(input_dialog)
+                                                        end,
+                                                    },
+                                                    {
+                                                        text = _("Reset to default"),
+                                                        callback = function()
+                                                            h_settings.progress_bar_unread_color = nil
+                                                            saveHeaderSettings(h_settings)
+                                                            touchmenu_instance:updateItems()
+                                                            if self.ui and self.ui.document then
+                                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                                            end
+                                                            UIManager:close(input_dialog)
+                                                        end,
+                                                    },
+                                                    {
+                                                        text = _("Save"),
+                                                        is_enter_default = true,
+                                                        callback = function()
+                                                            local text = input_dialog:getInputText()
+                                                            if text and text ~= "" then
+                                                                if not validateHexColor(text) then
+                                                                    UIManager:show(require("ui/widget/infomessage"):new{
+                                                                        text = _("Invalid color format. Use #RGB or #RRGGBB."),
+                                                                    })
+                                                                    return
+                                                                end
+                                                                h_settings.progress_bar_unread_color = text
+                                                                saveHeaderSettings(h_settings)
+                                                                touchmenu_instance:updateItems()
+                                                                if self.ui and self.ui.document then
+                                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                                end
+                                                                UIManager:close(input_dialog)
+                                                            end
+                                                        end,
+                                                    },
+                                                },
+                                            },
+                                        }
+                                        UIManager:show(input_dialog)
+                                        input_dialog:onShowKeyboard()
+                                    else
+                                        -- B/W device: use SpinWidget for grayscale slider
+                                        local current_value = hexToGrayscaleValue(current_color)
+                                        local SpinWidget = require("ui/widget/spinwidget")
+                                        local spin_widget = SpinWidget:new{
+                                            value = current_value,
+                                            value_min = 0,
+                                            value_max = 255,
+                                            value_step = 5,
+                                            value_hold_step = 15,
+                                            title_text = _("Unread portion value"),
+                                            info_text = _("0 = black, 255 = white"),
+                                            ok_text = _("Set value"),
+                                            extra_text = _("Reset to default"),
+                                            extra_callback = function()
+                                                h_settings.progress_bar_unread_color = nil
+                                                saveHeaderSettings(h_settings)
+                                                touchmenu_instance:updateItems()
+                                                if self.ui and self.ui.document then
+                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                end
+                                            end,
+                                            callback = function(spin)
+                                                h_settings.progress_bar_unread_color = grayscaleValueToHex(spin.value)
+                                                saveHeaderSettings(h_settings)
+                                                touchmenu_instance:updateItems()
+                                                if self.ui and self.ui.document then
+                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                end
+                                            end,
+                                        }
+                                        UIManager:show(spin_widget)
+                                    end
                                 end,
                                 keep_menu_open = true,
                             },
@@ -2298,46 +2493,111 @@ Examples:
                                 text_func = function()
                                     local h_settings = getHeaderSettings()
                                     local defaults = getDefaultProgressBarColors()
-                                    local gray_val = h_settings.progress_bar_marker_color or defaults.marker
+                                    local color = h_settings.progress_bar_marker_color or defaults.marker
                                     local marker_status = ""
                                     if h_settings.chapter_markers == "none" or h_settings.progress_bar_mode == "chapter" then
                                         marker_status = " (" .. _("not shown") .. ")"
                                     end
-                                    return T(_("Chapter marker: %1%2"), gray_val, marker_status)
+                                    if isColorDevice() then
+                                        return T(_("Chapter marker: %1%2"), color, marker_status)
+                                    else
+                                        local gray_val = hexToGrayscaleValue(color)
+                                        return T(_("Chapter marker: %1%2"), gray_val, marker_status)
+                                    end
                                 end,
                                 callback = function(touchmenu_instance)
                                     local h_settings = getHeaderSettings()
                                     local defaults = getDefaultProgressBarColors()
-                                    local current_value = h_settings.progress_bar_marker_color or defaults.marker
-                                    local SpinWidget = require("ui/widget/spinwidget")
-                                    local spin_widget = SpinWidget:new{
-                                        value = current_value,
-                                        value_min = 0,
-                                        value_max = 255,
-                                        value_step = 5,
-                                        value_hold_step = 15,
-                                        title_text = _("Chapter marker value"),
-                                        info_text = _("0 = black, 255 = white"),
-                                        ok_text = _("Set value"),
-                                        extra_text = _("Reset to default"),
-                                        extra_callback = function()
-                                            h_settings.progress_bar_marker_color = nil
-                                            saveHeaderSettings(h_settings)
-                                            touchmenu_instance:updateItems()
-                                            if self.ui and self.ui.document then
-                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                            end
-                                        end,
-                                        callback = function(spin)
-                                            h_settings.progress_bar_marker_color = spin.value
-                                            saveHeaderSettings(h_settings)
-                                            touchmenu_instance:updateItems()
-                                            if self.ui and self.ui.document then
-                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                            end
-                                        end,
-                                    }
-                                    UIManager:show(spin_widget)
+                                    local current_color = h_settings.progress_bar_marker_color or defaults.marker
+                                    
+                                    if isColorDevice() then
+                                        -- Color device: use InputDialog for hex color
+                                        local InputDialog = require("ui/widget/inputdialog")
+                                        local input_dialog
+                                        input_dialog = InputDialog:new{
+                                            title = _("Enter hex color for chapter markers (e.g., #000000)"),
+                                            input = current_color,
+                                            input_hint = "#RRGGBB",
+                                            buttons = {
+                                                {
+                                                    {
+                                                        text = _("Cancel"),
+                                                        callback = function()
+                                                            UIManager:close(input_dialog)
+                                                        end,
+                                                    },
+                                                    {
+                                                        text = _("Reset to default"),
+                                                        callback = function()
+                                                            h_settings.progress_bar_marker_color = nil
+                                                            saveHeaderSettings(h_settings)
+                                                            touchmenu_instance:updateItems()
+                                                            if self.ui and self.ui.document then
+                                                                UIManager:setDirty(self.ui.dialog, "ui")
+                                                            end
+                                                            UIManager:close(input_dialog)
+                                                        end,
+                                                    },
+                                                    {
+                                                        text = _("Save"),
+                                                        is_enter_default = true,
+                                                        callback = function()
+                                                            local text = input_dialog:getInputText()
+                                                            if text and text ~= "" then
+                                                                if not validateHexColor(text) then
+                                                                    UIManager:show(require("ui/widget/infomessage"):new{
+                                                                        text = _("Invalid color format. Use #RGB or #RRGGBB."),
+                                                                    })
+                                                                    return
+                                                                end
+                                                                h_settings.progress_bar_marker_color = text
+                                                                saveHeaderSettings(h_settings)
+                                                                touchmenu_instance:updateItems()
+                                                                if self.ui and self.ui.document then
+                                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                                end
+                                                                UIManager:close(input_dialog)
+                                                            end
+                                                        end,
+                                                    },
+                                                },
+                                            },
+                                        }
+                                        UIManager:show(input_dialog)
+                                        input_dialog:onShowKeyboard()
+                                    else
+                                        -- B/W device: use SpinWidget for grayscale slider
+                                        local current_value = hexToGrayscaleValue(current_color)
+                                        local SpinWidget = require("ui/widget/spinwidget")
+                                        local spin_widget = SpinWidget:new{
+                                            value = current_value,
+                                            value_min = 0,
+                                            value_max = 255,
+                                            value_step = 5,
+                                            value_hold_step = 15,
+                                            title_text = _("Chapter marker value"),
+                                            info_text = _("0 = black, 255 = white"),
+                                            ok_text = _("Set value"),
+                                            extra_text = _("Reset to default"),
+                                            extra_callback = function()
+                                                h_settings.progress_bar_marker_color = nil
+                                                saveHeaderSettings(h_settings)
+                                                touchmenu_instance:updateItems()
+                                                if self.ui and self.ui.document then
+                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                end
+                                            end,
+                                            callback = function(spin)
+                                                h_settings.progress_bar_marker_color = grayscaleValueToHex(spin.value)
+                                                saveHeaderSettings(h_settings)
+                                                touchmenu_instance:updateItems()
+                                                if self.ui and self.ui.document then
+                                                    UIManager:setDirty(self.ui.dialog, "ui")
+                                                end
+                                            end,
+                                        }
+                                        UIManager:show(spin_widget)
+                                    end
                                 end,
                                 keep_menu_open = true,
                             },
