@@ -27,12 +27,13 @@ local _ = require("gettext")
 local T = require("ffi/util").template
 local ReaderView = require("apps/reader/modules/readerview")
 local ReaderMenu = require("apps/reader/modules/readermenu")
+local ReaderFooter = require("apps/reader/modules/readerfooter")
 
 -- Available header items
 local HEADER_ITEMS = {
     time = { name = T(_("Current time (%1)"), "⌚"), generator = nil, is_spacer = false },
-    battery = { name = T(_("Battery percentage (%1)"), ""), generator = nil, is_spacer = false },
-    wifi = { name = T(_("Wi-Fi status (%1)"), ""), generator = nil, is_spacer = false },
+    battery = { name = T(_("Battery percentage (%1)"), "Batt"), generator = nil, is_spacer = false },
+    wifi = { name = T(_("Wi-Fi status (%1)"), ""), generator = nil, is_spacer = false },
     percentage = { name = T(_("Progress percentage (%1)"), "%"), generator = nil, is_spacer = false },
     page_progress = { name = T(_("Current page (%1)"), "/"), generator = nil, is_spacer = false },
     pages_left_book = { name = T(_("Pages left in book (%1)"), "→"), generator = nil, is_spacer = false },
@@ -45,7 +46,7 @@ local HEADER_ITEMS = {
     chapter = { name = _("Chapter title"), generator = nil, is_spacer = false },
     frontlight = { name = T(_("Brightness level (%1)"), "☼"), generator = nil, is_spacer = false },
     frontlight_warmth = { name = T(_("Warmth level (%1)"), "⊛"), generator = nil, is_spacer = false },
-    mem_usage = { name = T(_("KOReader memory usage (%1)"), ""), generator = nil, is_spacer = false },
+    mem_usage = { name = T(_("KOReader memory usage (%1)"), "Mem"), generator = nil, is_spacer = false },
     bookmark_count = { name = T(_("Bookmark count (%1)"), "\u{F097}"), generator = nil, is_spacer = false },
     custom_text = { name = _("Custom text"), generator = nil, is_spacer = false, is_dynamic = true },
     spacer = { name = _("Dynamic filler"), generator = nil, is_spacer = true },
@@ -64,9 +65,9 @@ local ITEMS_ORDER = {
 -- Separator styles
 local SEPARATOR_STYLES = {
     "  ",
-    " • ",
+    " � ",
     " - ",
-    " ○ ",
+    " 0 ",
     " : ",
     "custom",
 }
@@ -102,6 +103,18 @@ local header_defaults = {
     progress_bar_read_color = nil,
     progress_bar_unread_color = nil,
     progress_bar_marker_color = nil,
+    -- Color inversion settings
+    invert_colors = false,
+    footer_invert_colors = false,
+    footer_full_refresh_on_toggle = false,
+    invert_colors_in_night_mode = false,
+    -- Status bar separator settings
+    separator_enabled = false,
+    separator_color = "#000000",
+    separator_thickness = 2,
+    separator_top_margin = 4,
+    separator_side_margin = 0,
+    separator_follow_book_margins = false,
 }
 
 local function getHeaderSettings()
@@ -140,6 +153,18 @@ local function getHeaderSettings()
     if settings.progress_bar_read_color == nil then settings.progress_bar_read_color = nil end
     if settings.progress_bar_unread_color == nil then settings.progress_bar_unread_color = nil end
     if settings.progress_bar_marker_color == nil then settings.progress_bar_marker_color = nil end
+    -- Initialize color inversion settings
+    if settings.invert_colors == nil then settings.invert_colors = false end
+    if settings.footer_invert_colors == nil then settings.footer_invert_colors = false end
+    if settings.footer_full_refresh_on_toggle == nil then settings.footer_full_refresh_on_toggle = false end
+    if settings.invert_colors_in_night_mode == nil then settings.invert_colors_in_night_mode = false end
+    -- Initialize separator settings
+    if settings.separator_enabled == nil then settings.separator_enabled = false end
+    if settings.separator_color == nil then settings.separator_color = "#000000" end
+    if settings.separator_thickness == nil then settings.separator_thickness = 2 end
+    if settings.separator_top_margin == nil then settings.separator_top_margin = 0 end
+    if settings.separator_side_margin == nil then settings.separator_side_margin = 0 end
+    if settings.separator_follow_book_margins == nil then settings.separator_follow_book_margins = false end
     
     -- Clean up unsupported settings - keep only valid keys
     local valid_keys = {
@@ -168,10 +193,20 @@ local function getHeaderSettings()
         background_opacity = true,
         background_enabled = true,
         auto_background_for_pdf = true,
-        _background_manually_set = true,  -- Internal tracking state
+        _tap_bg_override = true,  -- Internal tracking state for tap cycle
         progress_bar_read_color = true,
         progress_bar_unread_color = true,
         progress_bar_marker_color = true,
+        invert_colors = true,
+        footer_invert_colors = true,
+        footer_full_refresh_on_toggle = true,
+        invert_colors_in_night_mode = true,
+        separator_enabled = true,
+        separator_color = true,
+        separator_thickness = true,
+        separator_top_margin = true,
+        separator_side_margin = true,
+        separator_follow_book_margins = true,
     }
     
     local cleaned = false
@@ -196,6 +231,11 @@ end
 
 local function isHeaderEnabled()
     return getHeaderSettings().enabled
+end
+
+-- Detect if night mode is active
+local function isNightMode()
+    return G_reader_settings:isTrue("night_mode")
 end
 
 -- Helper functions for color management
@@ -269,6 +309,201 @@ local function getDefaultProgressBarColors()
         read = "#555555",      -- Dark gray for read portion
         unread = "#AAAAAA",    -- Light gray for unread portion
         marker = "#000000",    -- Black for chapter markers
+    }
+end
+
+-- Menu item helper functions to reduce duplication
+
+local function createColorPickerItem(params)
+    -- Creates a color picker menu item that adapts to device type (color vs B/W)
+    -- params: {setting_key, default_value, label_text, title_text, info_text, reader_ui}
+    return {
+        text_func = function()
+            local h_settings = getHeaderSettings()
+            local color = h_settings[params.setting_key] or params.default_value
+            if isColorDevice() then
+                return T(_(params.label_text), color)
+            else
+                local gray_val = hexToGrayscaleValue(color)
+                return T(_(params.label_text), gray_val)
+            end
+        end,
+        callback = function(touchmenu_instance)
+            local h_settings = getHeaderSettings()
+            local current_color = h_settings[params.setting_key] or params.default_value
+            
+            if isColorDevice() then
+                -- Color device: use InputDialog for hex color
+                local InputDialog = require("ui/widget/inputdialog")
+                local input_dialog
+                input_dialog = InputDialog:new{
+                    title = _(params.title_text),
+                    input = current_color,
+                    input_hint = "#RRGGBB",
+                    buttons = {
+                        {
+                            {
+                                text = _("Cancel"),
+                                callback = function()
+                                    UIManager:close(input_dialog)
+                                end,
+                            },
+                            {
+                                text = _("Reset to default"),
+                                callback = function()
+                                    h_settings[params.setting_key] = params.reset_value or nil
+                                    saveHeaderSettings(h_settings)
+                                    touchmenu_instance:updateItems()
+                                    if params.reader_ui and params.reader_ui.document then
+                                        UIManager:setDirty(params.reader_ui.dialog, "ui")
+                                    end
+                                    UIManager:close(input_dialog)
+                                end,
+                            },
+                            {
+                                text = _("Save"),
+                                is_enter_default = true,
+                                callback = function()
+                                    local text = input_dialog:getInputText()
+                                    if text and text ~= "" then
+                                        if not validateHexColor(text) then
+                                            UIManager:show(require("ui/widget/infomessage"):new{
+                                                text = _("Invalid color format. Use #RGB or #RRGGBB."),
+                                            })
+                                            return
+                                        end
+                                        h_settings[params.setting_key] = text
+                                        saveHeaderSettings(h_settings)
+                                        touchmenu_instance:updateItems()
+                                        if params.reader_ui and params.reader_ui.document then
+                                            UIManager:setDirty(params.reader_ui.dialog, "ui")
+                                        end
+                                        UIManager:close(input_dialog)
+                                    end
+                                end,
+                            },
+                        },
+                    },
+                }
+                UIManager:show(input_dialog)
+                input_dialog:onShowKeyboard()
+            else
+                -- B/W device: use SpinWidget for grayscale slider
+                local current_value = hexToGrayscaleValue(current_color)
+                local SpinWidget = require("ui/widget/spinwidget")
+                local spin_widget = SpinWidget:new{
+                    value = current_value,
+                    value_min = 0,
+                    value_max = 255,
+                    value_step = 5,
+                    value_hold_step = 15,
+                    title_text = _(params.title_text),
+                    info_text = params.info_text and _(params.info_text) or _("0 = black, 255 = white"),
+                    ok_text = _("Set value"),
+                    extra_text = _("Reset to default"),
+                    extra_callback = function()
+                        h_settings[params.setting_key] = params.reset_value or nil
+                        saveHeaderSettings(h_settings)
+                        touchmenu_instance:updateItems()
+                        if params.reader_ui and params.reader_ui.document then
+                            UIManager:setDirty(params.reader_ui.dialog, "ui")
+                        end
+                    end,
+                    callback = function(spin)
+                        h_settings[params.setting_key] = grayscaleValueToHex(spin.value)
+                        saveHeaderSettings(h_settings)
+                        touchmenu_instance:updateItems()
+                        if params.reader_ui and params.reader_ui.document then
+                            UIManager:setDirty(params.reader_ui.dialog, "ui")
+                        end
+                    end,
+                }
+                UIManager:show(spin_widget)
+            end
+        end,
+        keep_menu_open = true,
+    }
+end
+
+local function createToggleItem(params)
+    -- Creates a toggle menu item for boolean settings
+    -- params: {text, setting_key, reader_ui}
+    return {
+        text = _(params.text),
+        checked_func = function()
+            local h_settings = getHeaderSettings()
+            return h_settings[params.setting_key]
+        end,
+        callback = function(touchmenu_instance)
+            local h_settings = getHeaderSettings()
+            h_settings[params.setting_key] = not h_settings[params.setting_key]
+            saveHeaderSettings(h_settings)
+            touchmenu_instance:updateItems()
+            if params.reader_ui and params.reader_ui.document then
+                UIManager:setDirty(params.reader_ui.dialog, "ui")
+            end
+        end,
+    }
+end
+
+local function createSpinWidgetItem(params)
+    -- Creates a SpinWidget menu item for numeric settings
+    -- params: {setting_key, default_value, label_text, title_text, info_text, 
+    --          ok_text, min, max, step, hold_step, reader_ui}
+    return {
+        text_func = function()
+            local h_settings = getHeaderSettings()
+            return T(_(params.label_text), h_settings[params.setting_key] or params.default_value)
+        end,
+        callback = function(touchmenu_instance)
+            local h_settings = getHeaderSettings()
+            local SpinWidget = require("ui/widget/spinwidget")
+            local spin_widget = SpinWidget:new{
+                value = h_settings[params.setting_key] or params.default_value,
+                value_min = params.min,
+                value_max = params.max,
+                value_step = params.step or 1,
+                value_hold_step = params.hold_step or (params.step or 1) * 5,
+                title_text = _(params.title_text),
+                info_text = params.info_text and _(params.info_text) or nil,
+                ok_text = params.ok_text and _(params.ok_text) or _("Set value"),
+                callback = function(spin)
+                    h_settings[params.setting_key] = spin.value
+                    saveHeaderSettings(h_settings)
+                    touchmenu_instance:updateItems()
+                    if params.reader_ui and params.reader_ui.document then
+                        UIManager:setDirty(params.reader_ui.dialog, "ui")
+                    end
+                end,
+            }
+            UIManager:show(spin_widget)
+        end,
+        keep_menu_open = true,
+    }
+end
+
+local function createRadioItem(params)
+    -- Creates a radio button menu item (for selecting one of multiple values)
+    -- params: {text, setting_key, value, default_value, reader_ui}
+    return {
+        text = _(params.text),
+        checked_func = function()
+            local h_settings = getHeaderSettings()
+            local current = h_settings[params.setting_key]
+            if current == nil and params.default_value ~= nil then
+                current = params.default_value
+            end
+            return current == params.value
+        end,
+        callback = function(touchmenu_instance)
+            local h_settings = getHeaderSettings()
+            h_settings[params.setting_key] = params.value
+            saveHeaderSettings(h_settings)
+            touchmenu_instance:updateItems()
+            if params.reader_ui and params.reader_ui.document then
+                UIManager:setDirty(params.reader_ui.dialog, "ui")
+            end
+        end,
     }
 end
 
@@ -613,39 +848,45 @@ local function setupHeaderTouchZone(reader_ui)
             handler = function(ges)
                 local h_settings = getHeaderSettings()
                 
-                -- Mark that background has been manually set
-                h_settings._background_manually_set = true
-                
-                -- Check if background option is available:
-                -- 1. Manually enabled in settings, OR
+                -- Check if background would be shown based on settings:
+                -- 1. Manually enabled in settings (background_enabled = true), OR
                 -- 2. Auto-enabled for this PDF
-                local background_available = h_settings.background_enabled
-                if not background_available and h_settings.auto_background_for_pdf and reader_ui.document then
+                local background_configured = h_settings.background_enabled
+                if not background_configured and h_settings.auto_background_for_pdf and reader_ui.document then
                     local doc_info = reader_ui.document.info
                     if doc_info and doc_info.has_pages then
-                        background_available = true
+                        background_configured = true
                     end
                 end
                 
-                -- Cycle modes
+                -- Tap cycle logic (respects menu settings, only toggles via _tap_bg_override):
+                -- If background configured: off -> on (with bg) -> on (transparent) -> off
+                -- If background not configured: off -> on -> off
                 if not h_settings.enabled then
-                    -- Currently off -> turn on without background
+                    -- Currently off -> turn on (respect background settings)
                     h_settings.enabled = true
-                    h_settings.background_enabled = false
-                elseif background_available and h_settings.background_enabled then
-                    -- Currently on with background -> turn off
-                    h_settings.enabled = false
-                    h_settings.background_enabled = false
-                elseif background_available and not h_settings.background_enabled then
-                    -- Currently on without background -> enable background
-                    h_settings.background_enabled = true
+                    h_settings._tap_bg_override = false  -- Clear any previous override
+                elseif h_settings.enabled and background_configured then
+                    -- Header is on and background is configured
+                    if not h_settings._tap_bg_override then
+                        -- Currently showing with background -> switch to transparent (override to hide bg)
+                        h_settings._tap_bg_override = true
+                    else
+                        -- Currently transparent -> turn off
+                        h_settings.enabled = false
+                        h_settings._tap_bg_override = false
+                    end
                 else
-                    -- Background not available, just toggle on/off
+                    -- Header is on but background not configured -> just turn off
                     h_settings.enabled = false
+                    h_settings._tap_bg_override = false
                 end
                 
                 saveHeaderSettings(h_settings)
-                UIManager:setDirty(reader_ui.dialog, "ui")
+                
+                -- Use full refresh if setting is enabled, otherwise use ui refresh
+                local refresh_type = h_settings.footer_full_refresh_on_toggle and "full" or "ui"
+                UIManager:setDirty(reader_ui.dialog, refresh_type)
                 return true
             end,
             overrides = {
@@ -837,7 +1078,7 @@ ReaderView.paintTo = function(self, bb, x, y)
         if add_ellipsis then
             -- Remove trailing spaces (including non-breaking spaces) before adding ellipsis
             fitted_text = fitted_text:gsub("[\u{0020}\u{00A0}]+$", "")
-            fitted_text = fitted_text .. "…"
+            fitted_text = fitted_text .. "�"
         end
         -- Return final widget with proper styling
         return TextWidget:new{
@@ -1057,11 +1298,13 @@ ReaderView.paintTo = function(self, bb, x, y)
     if not background_enabled and h_settings.auto_background_for_pdf and self.ui.document then
         local doc_info = self.ui.document.info
         if doc_info and doc_info.has_pages then
-            -- Only apply auto-enable if user hasn't manually cycled yet
-            if h_settings._background_manually_set ~= true then
-                background_enabled = true
-            end
+            background_enabled = true
         end
+    end
+    
+    -- Apply tap override if user manually disabled background via tap
+    if h_settings._tap_bg_override then
+        background_enabled = false
     end
     
     -- Draw semi-transparent background if enabled
@@ -1103,6 +1346,54 @@ ReaderView.paintTo = function(self, bb, x, y)
         -- Paint directly at 100% opacity
         header:paintTo(bb, x, y)
     end
+    
+    -- Draw separator if enabled
+    if h_settings.separator_enabled then
+        local separator_y = y + total_height
+        local separator_thickness_val = h_settings.separator_thickness or 2
+        
+        -- Calculate separator margins
+        local separator_left_margin = 0
+        local separator_right_margin = 0
+        if h_settings.separator_follow_book_margins and self.document and self.document.getPageMargins then
+            local page_margins = self.document:getPageMargins()
+            separator_left_margin = page_margins.left or 0
+            separator_right_margin = page_margins.right or 0
+        else
+            separator_left_margin = h_settings.separator_side_margin or 0
+            separator_right_margin = h_settings.separator_side_margin or 0
+        end
+        
+        local separator_top_margin_val = h_settings.separator_top_margin or 0
+        separator_y = separator_y + separator_top_margin_val
+        
+        local separator_width = screen_width - separator_left_margin - separator_right_margin
+        local separator_x = x + separator_left_margin
+        
+        -- Draw the separator
+        local separator_color_val = Blitbuffer.colorFromString(h_settings.separator_color or "#000000")
+        if Blitbuffer.isColor8(separator_color_val) then
+            bb:paintRect(separator_x, separator_y, separator_width, separator_thickness_val, separator_color_val)
+        else
+            bb:paintRectRGB32(separator_x, separator_y, separator_width, separator_thickness_val, separator_color_val)
+        end
+    end
+    
+    -- Apply color inversion if enabled (KOReader's standard inversion method)
+    local should_invert = h_settings.invert_colors
+    if h_settings.invert_colors_in_night_mode and isNightMode() then
+        should_invert = not should_invert
+    end
+    if should_invert then
+        local invert_height = total_height
+        -- Include separator and margins in inversion if enabled
+        if h_settings.separator_enabled then
+            local separator_top_margin_val = h_settings.separator_top_margin or 4
+            local separator_thickness_val = h_settings.separator_thickness or 3
+            invert_height = invert_height + separator_top_margin_val + separator_thickness_val
+        end
+        bb:invertRect(x, y, screen_width, invert_height)
+    end
 end
 
 -- Menu
@@ -1118,10 +1409,62 @@ function ReaderUI:init()
     if h_settings.auto_background_for_pdf and self.document then
         local doc_info = self.document.info
         if doc_info and doc_info.has_pages then
-            -- Only auto-enable if user hasn't manually set it yet
-            if h_settings._background_manually_set ~= true then
-                h_settings.enabled = true
-                saveHeaderSettings(h_settings)
+            -- Auto-enable header for fixed-layout documents
+            h_settings.enabled = true
+            saveHeaderSettings(h_settings)
+        end
+    end
+end
+
+-- Hook footer inversion via ReaderFooter's onReaderReady (footer is fully set up by then)
+local orig_ReaderFooter_onReaderReady = ReaderFooter.onReaderReady
+ReaderFooter.onReaderReady = function(self)
+    -- Call original first
+    if orig_ReaderFooter_onReaderReady then
+        orig_ReaderFooter_onReaderReady(self)
+    end
+    
+    -- Now hook paintTo on this specific instance
+    local orig_paintTo = self.paintTo
+    self.paintTo = function(ftself, bb, x, y)
+        -- Call original paintTo
+        orig_paintTo(ftself, bb, x, y)
+        
+        -- Apply color inversion if enabled
+        if ftself.view and ftself.view.footer_visible and ftself.footer_content then
+            local inv_settings = getHeaderSettings()
+            if inv_settings and inv_settings.footer_invert_colors then
+                local should_invert = inv_settings.footer_invert_colors
+                if inv_settings.invert_colors_in_night_mode and isNightMode() then
+                    should_invert = not should_invert
+                end
+                
+                if should_invert then
+                    local footer_size = ftself.footer_content:getSize()
+                    local screen_height = Screen:getHeight()
+                    local footer_y = screen_height - footer_size.h
+                    bb:invertRect(0, footer_y, Screen:getWidth(), footer_size.h)
+                end
+            end
+        end
+    end
+    
+    -- Hook updateFooterText to force full refresh on footer toggle when setting is enabled
+    -- Note: After onReaderReady, updateFooterText points to _updateFooterText
+    local orig_updateFooterText = self.updateFooterText
+    self.updateFooterText = function(ftself, force_repaint, alt_mode_text)
+        -- Call original updateFooterText normally
+        orig_updateFooterText(ftself, force_repaint, alt_mode_text)
+        
+        -- If this is a footer toggle and full refresh is enabled, schedule a delayed full refresh
+        if force_repaint then
+            local inv_settings = getHeaderSettings()
+            if inv_settings and inv_settings.footer_full_refresh_on_toggle and ftself.view and ftself.view.dialog then
+                -- Delay the full refresh to allow the partial refresh to complete first
+                -- This prevents ghosting artifacts that appear when refreshes overlap
+                UIManager:scheduleIn(0.05, function()
+                    UIManager:setDirty(ftself.view.dialog, "full")
+                end)
             end
         end
     end
@@ -1156,9 +1499,9 @@ local orig_ReaderView_onCloseDocument = ReaderView.onCloseDocument
 ReaderView.onCloseDocument = function(self, ...)
     -- Clear header caches before document closes
     self._header_cache = nil
-    -- Reset manual background flag so auto-enable can work on next document
+    -- Reset tap background override so next document starts fresh
     local h_settings = getHeaderSettings()
-    h_settings._background_manually_set = false
+    h_settings._tap_bg_override = false
     saveHeaderSettings(h_settings)
     if orig_ReaderView_onCloseDocument then
         return orig_ReaderView_onCloseDocument(self, ...)
@@ -1222,7 +1565,7 @@ You can use these variables in custom text by wrapping them in curly braces:
 
 Examples:
   By {author}
-  📖 {title}
+  ?? {title}
   {author} - {percentage}]]
                                         UIManager:show(InfoMessage:new{
                                             text = variable_list,
@@ -1291,7 +1634,7 @@ Examples:
                                                 text_func = function()
                                                     local current_settings = getHeaderSettings()
                                                     local current_text = current_settings.custom_texts[idx] or ""
-                                                    local status = current_settings.disabled_custom_texts[idx] and " [✗]" or ""
+                                                    local status = current_settings.disabled_custom_texts[idx] and " [?]" or ""
                                                     return T(_("Text %1: '%2'%3"), idx, current_text, status)
                                                 end,
                                                 sub_item_table = {
@@ -1650,23 +1993,15 @@ Examples:
                                             end
                                         end,
                                     },
-                                    {
-                                        text = _("Show icon only when on"),
-                                        checked_func = function()
-                                            local h_settings = getHeaderSettings()
-                                            return h_settings.wifi_on_only == true
-                                        end,
-                                        callback = function(touchmenu_instance)
-                                            local h_settings = getHeaderSettings()
-                                            h_settings.wifi_on_only = not h_settings.wifi_on_only
-                                            saveHeaderSettings(h_settings)
-                                            touchmenu_instance:updateItems()
-                                            if self.ui and self.ui.document then
-                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                            end
-                                        end,
-                                        separator = true,
-                                    },
+                                    (function()
+                                        local item = createToggleItem{
+                                            text = "Show icon only when on",
+                                            setting_key = "wifi_on_only",
+                                            reader_ui = self.ui,
+                                        }
+                                        item.separator = true
+                                        return item
+                                    end)(),
                                 },
                             })
                         else
@@ -1859,144 +2194,171 @@ Examples:
                 text = _("Font settings"),
                 separator = true,
                 sub_item_table = {
-                    {
-                        text_func = function()
-                            local h_settings = getHeaderSettings()
-                            return T(_("Font size: %1"), h_settings.font_size)
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local spin_widget = SpinWidget:new{
-                                value = h_settings.font_size,
-                                value_min = 8,
-                                value_max = 36,
-                                value_step = 1,
-                                value_hold_step = 2,
-                                title_text = _("Header font size"),
-                                ok_text = _("Set size"),
-                                callback = function(spin)
-                                    h_settings.font_size = spin.value
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
-                            }
-                            UIManager:show(spin_widget)
-                        end,
-                        keep_menu_open = true,
+                    createSpinWidgetItem{
+                        setting_key = "font_size",
+                        default_value = 18,
+                        label_text = "Font size: %1",
+                        title_text = "Header font size",
+                        ok_text = "Set size",
+                        min = 8,
+                        max = 36,
+                        step = 1,
+                        hold_step = 2,
+                        reader_ui = self.ui,
                     },
-                    {
-                        text = _("Bold font"),
-                        checked_func = function()
-                            local h_settings = getHeaderSettings()
-                            return h_settings.font_bold
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            h_settings.font_bold = not h_settings.font_bold
-                            saveHeaderSettings(h_settings)
-                            touchmenu_instance:updateItems()
-                            if self.ui and self.ui.document then
-                                UIManager:setDirty(self.ui.dialog, "ui")
-                            end
-                        end,
+                    createToggleItem{
+                        text = "Bold font",
+                        setting_key = "font_bold",
+                        reader_ui = self.ui,
                     },
                 },
             },
             {
-                text = _("Status bar opacity"),
-                callback = function(touchmenu_instance)
-                    local h_settings = getHeaderSettings()
-                    local SpinWidget = require("ui/widget/spinwidget")
-                    local spin_widget = SpinWidget:new{
-                        value = h_settings.header_opacity or 100,
-                        value_min = 0,
-                        value_max = 100,
-                        value_step = 5,
-                        value_hold_step = 10,
-                        title_text = _("Status bar opacity"),
-                        info_text = _("Adjust transparency of the status bar content (100% = fully opaque, 0% = fully transparent)"),
-                        ok_text = _("Set opacity"),
-                        callback = function(spin)
-                            h_settings.header_opacity = spin.value
-                            saveHeaderSettings(h_settings)
-                            touchmenu_instance:updateItems()
-                            if self.ui and self.ui.document then
-                                UIManager:setDirty(self.ui.dialog, "ui")
-                            end
-                        end,
-                    }
-                    UIManager:show(spin_widget)
-                end,
-                keep_menu_open = true,
+                text = _("Color settings"),
+                separator = true,
+                sub_item_table = {
+                    createToggleItem{
+                        text = "Invert status bar",
+                        setting_key = "invert_colors",
+                        reader_ui = self.ui,
+                    },
+                    (function()
+                        local item = createToggleItem{
+                            text = "Invert footer bar",
+                            setting_key = "footer_invert_colors",
+                            reader_ui = self.ui,
+                        }
+                        item.separator = true
+                        return item
+                    end)(),
+                    (function()
+                        local item = createToggleItem{
+                            text = "Full refresh on toggle",
+                            setting_key = "footer_full_refresh_on_toggle",
+                            reader_ui = self.ui,
+                        }
+                        item.help_text = _("When enabled, header/footer show/hide actions will use full page refresh mode to reduce ghosting/residue on e-ink screens. May cause a brief flash.")
+                        item.separator = true
+                        return item
+                    end)(),
+                    (function()
+                        local item = createToggleItem{
+                            text = "Respect night mode",
+                            setting_key = "invert_colors_in_night_mode",
+                            reader_ui = self.ui,
+                        }
+                        item.help_text = _("When enabled, color inversion will be toggled automatically based on KOReader's global night mode setting (applies to both bars).")
+                        return item
+                    end)(),
+                },
+            },
+            {
+                text = _("Status bar separator"),
+                separator = true,
+                sub_item_table = {
+                    createToggleItem{
+                        text = "Enable separator",
+                        setting_key = "separator_enabled",
+                        reader_ui = self.ui,
+                    },
+                    createColorPickerItem{
+                        setting_key = "separator_color",
+                        default_value = "#000000",
+                        label_text = "Line color: %1",
+                        title_text = "Separator color",
+                        info_text = "0 = black, 255 = white",
+                        reset_value = "#000000",
+                        reader_ui = self.ui,
+                    },
+                    createSpinWidgetItem{
+                        setting_key = "separator_thickness",
+                        default_value = 3,
+                        label_text = "Line thickness: %1",
+                        title_text = "Separator thickness",
+                        ok_text = "Set thickness",
+                        min = 1,
+                        max = 20,
+                        step = 1,
+                        hold_step = 2,
+                        reader_ui = self.ui,
+                    },
+                    createSpinWidgetItem{
+                        setting_key = "separator_top_margin",
+                        default_value = 4,
+                        label_text = "Top margin: %1",
+                        title_text = "Space between header and separator",
+                        ok_text = "Set margin",
+                        min = 0,
+                        max = 50,
+                        step = 1,
+                        hold_step = 5,
+                        reader_ui = self.ui,
+                    },
+                    createToggleItem{
+                        text = "Follow book margins",
+                        setting_key = "separator_follow_book_margins",
+                        reader_ui = self.ui,
+                    },
+                    (function()
+                        local item = createSpinWidgetItem{
+                            setting_key = "separator_side_margin",
+                            default_value = 0,
+                            label_text = "Side margins: %1",
+                            title_text = "Separator side margins (left & right)",
+                            ok_text = "Set margins",
+                            min = 0,
+                            max = 100,
+                            step = 1,
+                            hold_step = 5,
+                            reader_ui = self.ui,
+                        }
+                        -- Add enabled_func to disable when following book margins
+                        item.enabled_func = function()
+                            local h_settings = getHeaderSettings()
+                            return not h_settings.separator_follow_book_margins
+                        end
+                        return item
+                    end)(),
+                },
+            },
+            createSpinWidgetItem{
+                setting_key = "header_opacity",
+                default_value = 100,
+                label_text = "Status bar opacity",
+                title_text = "Status bar opacity",
+                info_text = "Adjust transparency of the status bar content (100% = fully opaque, 0% = fully transparent)",
+                ok_text = "Set opacity",
+                min = 0,
+                max = 100,
+                step = 5,
+                hold_step = 10,
+                reader_ui = self.ui,
             },
             {
                 text = _("Status bar background opacity"),
                 sub_item_table = {
-                    {
-                        text = _("Enable for all books"),
-                        checked_func = function()
-                            local h_settings = getHeaderSettings()
-                            return h_settings.background_enabled
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            h_settings.background_enabled = not h_settings.background_enabled
-                            saveHeaderSettings(h_settings)
-                            touchmenu_instance:updateItems()
-                            if self.ui and self.ui.document then
-                                UIManager:setDirty(self.ui.dialog, "ui")
-                            end
-                        end,
+                    createToggleItem{
+                        text = "Enable for all books",
+                        setting_key = "background_enabled",
+                        reader_ui = self.ui,
                     },
-                    {
-                        text = _("Enable for non-reflowable books"),
-                        checked_func = function()
-                            local h_settings = getHeaderSettings()
-                            return h_settings.auto_background_for_pdf
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            h_settings.auto_background_for_pdf = not h_settings.auto_background_for_pdf
-                            saveHeaderSettings(h_settings)
-                            touchmenu_instance:updateItems()
-                            if self.ui and self.ui.document then
-                                UIManager:setDirty(self.ui.dialog, "ui")
-                            end
-                        end,
+                    createToggleItem{
+                        text = "Enable for non-reflowable books",
+                        setting_key = "auto_background_for_pdf",
+                        reader_ui = self.ui,
                     },
-                    {
-                        text_func = function()
-                            local h_settings = getHeaderSettings()
-                            return T(_("Background opacity: %1%"), h_settings.background_opacity or 70)
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local spin_widget = SpinWidget:new{
-                                value = h_settings.background_opacity or 70,
-                                value_min = 0,
-                                value_max = 100,
-                                value_step = 5,
-                                value_hold_step = 10,
-                                title_text = _("Background opacity"),
-                                info_text = _("Opacity of the background behind status bar (100% = fully opaque, 0% = fully transparent)"),
-                                ok_text = _("Set opacity"),
-                                callback = function(spin)
-                                    h_settings.background_opacity = spin.value
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
-                            }
-                            UIManager:show(spin_widget)
-                        end,
-                        keep_menu_open = true,
+                    createSpinWidgetItem{
+                        setting_key = "background_opacity",
+                        default_value = 70,
+                        label_text = "Background opacity: %1%",
+                        title_text = "Background opacity",
+                        info_text = "Opacity of the background behind status bar (100% = fully opaque, 0% = fully transparent)",
+                        ok_text = "Set opacity",
+                        min = 0,
+                        max = 100,
+                        step = 5,
+                        hold_step = 10,
+                        reader_ui = self.ui,
                     },
                 },
                 separator = true,
@@ -2005,112 +2367,53 @@ Examples:
                 text = _("Margins"),
                 separator = true,
                 sub_item_table = {
-                    {
-                        text_func = function()
-                            local h_settings = getHeaderSettings()
-                            return T(_("Top margin: %1"), h_settings.header_top_margin or 2)
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local spin_widget = SpinWidget:new{
-                                value = h_settings.header_top_margin or 2,
-                                value_min = 0,
-                                value_max = 20,
-                                value_step = 1,
-                                value_hold_step = 2,
-                                title_text = _("Header top margin"),
-                                ok_text = _("Set margin"),
-                                callback = function(spin)
-                                    h_settings.header_top_margin = spin.value
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
-                            }
-                            UIManager:show(spin_widget)
-                        end,
-                        keep_menu_open = true,
+                    createSpinWidgetItem{
+                        setting_key = "header_top_margin",
+                        default_value = 2,
+                        label_text = "Top margin: %1",
+                        title_text = "Header top margin",
+                        ok_text = "Set margin",
+                        min = 0,
+                        max = 20,
+                        step = 1,
+                        hold_step = 2,
+                        reader_ui = self.ui,
                     },
-                    {
-                        text = _("Follow book margins"),
-                        checked_func = function()
-                            local h_settings = getHeaderSettings()
-                            return h_settings.follow_book_margins
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            h_settings.follow_book_margins = not h_settings.follow_book_margins
-                            saveHeaderSettings(h_settings)
-                            touchmenu_instance:updateItems()
-                            if self.ui and self.ui.document then
-                                UIManager:setDirty(self.ui.dialog, "ui")
-                            end
-                        end,
+                    createToggleItem{
+                        text = "Follow book margins",
+                        setting_key = "follow_book_margins",
+                        reader_ui = self.ui,
                     },
-                    {
-                        text_func = function()
-                            local h_settings = getHeaderSettings()
-                            return T(_("Side margins: %1"), h_settings.header_side_margin or 10)
-                        end,
-                        enabled_func = function()
+                    (function()
+                        local item = createSpinWidgetItem{
+                            setting_key = "header_side_margin",
+                            default_value = 10,
+                            label_text = "Side margins: %1",
+                            title_text = "Header side margins (left & right)",
+                            ok_text = "Set margins",
+                            min = 0,
+                            max = 50,
+                            step = 1,
+                            hold_step = 5,
+                            reader_ui = self.ui,
+                        }
+                        item.enabled_func = function()
                             local h_settings = getHeaderSettings()
                             return not h_settings.follow_book_margins
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local spin_widget = SpinWidget:new{
-                                value = h_settings.header_side_margin or 10,
-                                value_min = 0,
-                                value_max = 50,
-                                value_step = 1,
-                                value_hold_step = 5,
-                                title_text = _("Header side margins (left & right)"),
-                                ok_text = _("Set margins"),
-                                callback = function(spin)
-                                    h_settings.header_side_margin = spin.value
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
-                            }
-                            UIManager:show(spin_widget)
-                        end,
-                        keep_menu_open = true,
-                    },
-                    {
-                        text_func = function()
-                            local h_settings = getHeaderSettings()
-                            return T(_("Progress bar top margin: %1"), h_settings.header_bottom_margin or 2)
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local spin_widget = SpinWidget:new{
-                                value = h_settings.header_bottom_margin or 2,
-                                value_min = 0,
-                                value_max = 20,
-                                value_step = 1,
-                                value_hold_step = 2,
-                                title_text = _("Margin between items and progress bar"),
-                                ok_text = _("Set margin"),
-                                callback = function(spin)
-                                    h_settings.header_bottom_margin = spin.value
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
-                            }
-                            UIManager:show(spin_widget)
-                        end,
-                        keep_menu_open = true,
+                        end
+                        return item
+                    end)(),
+                    createSpinWidgetItem{
+                        setting_key = "header_bottom_margin",
+                        default_value = 2,
+                        label_text = "Progress bar top margin: %1",
+                        title_text = "Margin between items and progress bar",
+                        ok_text = "Set margin",
+                        min = 0,
+                        max = 20,
+                        step = 1,
+                        hold_step = 2,
+                        reader_ui = self.ui,
                     },
                 },
             },
@@ -2118,55 +2421,30 @@ Examples:
                 text = _("Progress bar"),
                 separator = true,
                 sub_item_table = {
-                    {
-                        text = _("Show progress bar"),
-                        checked_func = function()
+                    createToggleItem{
+                        text = "Show progress bar",
+                        setting_key = "show_progress_bar",
+                        reader_ui = self.ui,
+                    },
+                    (function()
+                        local item = createSpinWidgetItem{
+                            setting_key = "progress_bar_height",
+                            default_value = 4,
+                            label_text = "Bar height: %1",
+                            title_text = "Progress bar height",
+                            ok_text = "Set height",
+                            min = 1,
+                            max = 20,
+                            step = 1,
+                            hold_step = 2,
+                            reader_ui = self.ui,
+                        }
+                        item.enabled_func = function()
                             local h_settings = getHeaderSettings()
                             return h_settings.show_progress_bar
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            h_settings.show_progress_bar = not h_settings.show_progress_bar
-                            saveHeaderSettings(h_settings)
-                            touchmenu_instance:updateItems()
-                            if self.ui and self.ui.document then
-                                UIManager:setDirty(self.ui.dialog, "ui")
-                            end
-                        end,
-                    },
-                    {
-                        text_func = function()
-                            local h_settings = getHeaderSettings()
-                            return T(_("Bar height: %1"), h_settings.progress_bar_height)
-                        end,
-                        enabled_func = function()
-                            local h_settings = getHeaderSettings()
-                            return h_settings.show_progress_bar
-                        end,
-                        callback = function(touchmenu_instance)
-                            local h_settings = getHeaderSettings()
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local spin_widget = SpinWidget:new{
-                                value = h_settings.progress_bar_height,
-                                value_min = 1,
-                                value_max = 20,
-                                value_step = 1,
-                                value_hold_step = 2,
-                                title_text = _("Progress bar height"),
-                                ok_text = _("Set height"),
-                                callback = function(spin)
-                                    h_settings.progress_bar_height = spin.value
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
-                            }
-                            UIManager:show(spin_widget)
-                        end,
-                        keep_menu_open = true,
-                    },
+                        end
+                        return item
+                    end)(),
                     {
                         text = _("Progress bar mode"),
                         enabled_func = function()
@@ -2174,37 +2452,19 @@ Examples:
                             return h_settings.show_progress_bar
                         end,
                         sub_item_table = {
-                            {
-                                text = _("Whole book"),
-                                checked_func = function()
-                                    local h_settings = getHeaderSettings()
-                                    return (h_settings.progress_bar_mode or "book") == "book"
-                                end,
-                                callback = function(touchmenu_instance)
-                                    local h_settings = getHeaderSettings()
-                                    h_settings.progress_bar_mode = "book"
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
+                            createRadioItem{
+                                text = "Whole book",
+                                setting_key = "progress_bar_mode",
+                                value = "book",
+                                default_value = "book",
+                                reader_ui = self.ui,
                             },
-                            {
-                                text = _("Current chapter"),
-                                checked_func = function()
-                                    local h_settings = getHeaderSettings()
-                                    return h_settings.progress_bar_mode == "chapter"
-                                end,
-                                callback = function(touchmenu_instance)
-                                    local h_settings = getHeaderSettings()
-                                    h_settings.progress_bar_mode = "chapter"
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
+                            createRadioItem{
+                                text = "Current chapter",
+                                setting_key = "progress_bar_mode",
+                                value = "chapter",
+                                default_value = "book",
+                                reader_ui = self.ui,
                             },
                         },
                     },
@@ -2216,53 +2476,26 @@ Examples:
                             return h_settings.show_progress_bar and mode == "book"
                         end,
                         sub_item_table = {
-                            {
-                                text = _("None"),
-                                checked_func = function()
-                                    local h_settings = getHeaderSettings()
-                                    return h_settings.chapter_markers == "none"
-                                end,
-                                callback = function(touchmenu_instance)
-                                    local h_settings = getHeaderSettings()
-                                    h_settings.chapter_markers = "none"
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
+                            createRadioItem{
+                                text = "None",
+                                setting_key = "chapter_markers",
+                                value = "none",
+                                default_value = "none",
+                                reader_ui = self.ui,
                             },
-                            {
-                                text = _("Main chapters only"),
-                                checked_func = function()
-                                    local h_settings = getHeaderSettings()
-                                    return h_settings.chapter_markers == "main"
-                                end,
-                                callback = function(touchmenu_instance)
-                                    local h_settings = getHeaderSettings()
-                                    h_settings.chapter_markers = "main"
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
+                            createRadioItem{
+                                text = "Main chapters only",
+                                setting_key = "chapter_markers",
+                                value = "main",
+                                default_value = "none",
+                                reader_ui = self.ui,
                             },
-                            {
-                                text = _("All chapters"),
-                                checked_func = function()
-                                    local h_settings = getHeaderSettings()
-                                    return h_settings.chapter_markers == "all"
-                                end,
-                                callback = function(touchmenu_instance)
-                                    local h_settings = getHeaderSettings()
-                                    h_settings.chapter_markers = "all"
-                                    saveHeaderSettings(h_settings)
-                                    touchmenu_instance:updateItems()
-                                    if self.ui and self.ui.document then
-                                        UIManager:setDirty(self.ui.dialog, "ui")
-                                    end
-                                end,
+                            createRadioItem{
+                                text = "All chapters",
+                                setting_key = "chapter_markers",
+                                value = "all",
+                                default_value = "none",
+                                reader_ui = self.ui,
                             },
                         },
                     },
@@ -2273,227 +2506,71 @@ Examples:
                             return h_settings.show_progress_bar
                         end,
                         sub_item_table = {
-                            {
-                                text_func = function()
+                            (function()
+                                -- Create color picker with dynamic default value from getDefaultProgressBarColors()
+                                local defaults = getDefaultProgressBarColors()
+                                local item = createColorPickerItem{
+                                    setting_key = "progress_bar_read_color",
+                                    default_value = defaults.read,
+                                    label_text = "Read portion: %1",
+                                    title_text = "Enter hex color for read portion (e.g., #808080)",
+                                    info_text = "0 = black, 255 = white",
+                                    reset_value = nil,
+                                    reader_ui = self.ui,
+                                }
+                                -- Override text_func to get fresh defaults each time
+                                local orig_text_func = item.text_func
+                                item.text_func = function()
                                     local h_settings = getHeaderSettings()
-                                    local defaults = getDefaultProgressBarColors()
-                                    local color = h_settings.progress_bar_read_color or defaults.read
+                                    local defs = getDefaultProgressBarColors()
+                                    local color = h_settings.progress_bar_read_color or defs.read
                                     if isColorDevice() then
                                         return T(_("Read portion: %1"), color)
                                     else
-                                        local gray_val = hexToGrayscaleValue(color)
-                                        return T(_("Read portion: %1"), gray_val)
+                                        return T(_("Read portion: %1"), hexToGrayscaleValue(color))
                                     end
-                                end,
-                                callback = function(touchmenu_instance)
+                                end
+                                return item
+                            end)(),
+                            (function()
+                                local defaults = getDefaultProgressBarColors()
+                                local item = createColorPickerItem{
+                                    setting_key = "progress_bar_unread_color",
+                                    default_value = defaults.unread,
+                                    label_text = "Unread portion: %1",
+                                    title_text = "Enter hex color for unread portion (e.g., #C0C0C0)",
+                                    info_text = "0 = black, 255 = white",
+                                    reset_value = nil,
+                                    reader_ui = self.ui,
+                                }
+                                item.text_func = function()
                                     local h_settings = getHeaderSettings()
-                                    local defaults = getDefaultProgressBarColors()
-                                    local current_color = h_settings.progress_bar_read_color or defaults.read
-                                    
-                                    if isColorDevice() then
-                                        -- Color device: use InputDialog for hex color
-                                        local InputDialog = require("ui/widget/inputdialog")
-                                        local input_dialog
-                                        input_dialog = InputDialog:new{
-                                            title = _("Enter hex color for read portion (e.g., #808080)"),
-                                            input = current_color,
-                                            input_hint = "#RRGGBB",
-                                            buttons = {
-                                                {
-                                                    {
-                                                        text = _("Cancel"),
-                                                        callback = function()
-                                                            UIManager:close(input_dialog)
-                                                        end,
-                                                    },
-                                                    {
-                                                        text = _("Reset to default"),
-                                                        callback = function()
-                                                            h_settings.progress_bar_read_color = nil
-                                                            saveHeaderSettings(h_settings)
-                                                            touchmenu_instance:updateItems()
-                                                            if self.ui and self.ui.document then
-                                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                                            end
-                                                            UIManager:close(input_dialog)
-                                                        end,
-                                                    },
-                                                    {
-                                                        text = _("Save"),
-                                                        is_enter_default = true,
-                                                        callback = function()
-                                                            local text = input_dialog:getInputText()
-                                                            if text and text ~= "" then
-                                                                if not validateHexColor(text) then
-                                                                    UIManager:show(require("ui/widget/infomessage"):new{
-                                                                        text = _("Invalid color format. Use #RGB or #RRGGBB."),
-                                                                    })
-                                                                    return
-                                                                end
-                                                                h_settings.progress_bar_read_color = text
-                                                                saveHeaderSettings(h_settings)
-                                                                touchmenu_instance:updateItems()
-                                                                if self.ui and self.ui.document then
-                                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                                end
-                                                                UIManager:close(input_dialog)
-                                                            end
-                                                        end,
-                                                    },
-                                                },
-                                            },
-                                        }
-                                        UIManager:show(input_dialog)
-                                        input_dialog:onShowKeyboard()
-                                    else
-                                        -- B/W device: use SpinWidget for grayscale slider
-                                        local current_value = hexToGrayscaleValue(current_color)
-                                        local SpinWidget = require("ui/widget/spinwidget")
-                                        local spin_widget = SpinWidget:new{
-                                            value = current_value,
-                                            value_min = 0,
-                                            value_max = 255,
-                                            value_step = 5,
-                                            value_hold_step = 15,
-                                            title_text = _("Read portion value"),
-                                            info_text = _("0 = black, 255 = white"),
-                                            ok_text = _("Set value"),
-                                            extra_text = _("Reset to default"),
-                                            extra_callback = function()
-                                                h_settings.progress_bar_read_color = nil
-                                                saveHeaderSettings(h_settings)
-                                                touchmenu_instance:updateItems()
-                                                if self.ui and self.ui.document then
-                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                end
-                                            end,
-                                            callback = function(spin)
-                                                h_settings.progress_bar_read_color = grayscaleValueToHex(spin.value)
-                                                saveHeaderSettings(h_settings)
-                                                touchmenu_instance:updateItems()
-                                                if self.ui and self.ui.document then
-                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                end
-                                            end,
-                                        }
-                                        UIManager:show(spin_widget)
-                                    end
-                                end,
-                                keep_menu_open = true,
-                            },
-                            {
-                                text_func = function()
-                                    local h_settings = getHeaderSettings()
-                                    local defaults = getDefaultProgressBarColors()
-                                    local color = h_settings.progress_bar_unread_color or defaults.unread
+                                    local defs = getDefaultProgressBarColors()
+                                    local color = h_settings.progress_bar_unread_color or defs.unread
                                     if isColorDevice() then
                                         return T(_("Unread portion: %1"), color)
                                     else
-                                        local gray_val = hexToGrayscaleValue(color)
-                                        return T(_("Unread portion: %1"), gray_val)
+                                        return T(_("Unread portion: %1"), hexToGrayscaleValue(color))
                                     end
-                                end,
-                                callback = function(touchmenu_instance)
+                                end
+                                return item
+                            end)(),
+                            (function()
+                                local defaults = getDefaultProgressBarColors()
+                                local item = createColorPickerItem{
+                                    setting_key = "progress_bar_marker_color",
+                                    default_value = defaults.marker,
+                                    label_text = "Chapter marker: %1",
+                                    title_text = "Enter hex color for chapter markers (e.g., #000000)",
+                                    info_text = "0 = black, 255 = white",
+                                    reset_value = nil,
+                                    reader_ui = self.ui,
+                                }
+                                -- Custom text_func to show marker status
+                                item.text_func = function()
                                     local h_settings = getHeaderSettings()
-                                    local defaults = getDefaultProgressBarColors()
-                                    local current_color = h_settings.progress_bar_unread_color or defaults.unread
-                                    
-                                    if isColorDevice() then
-                                        -- Color device: use InputDialog for hex color
-                                        local InputDialog = require("ui/widget/inputdialog")
-                                        local input_dialog
-                                        input_dialog = InputDialog:new{
-                                            title = _("Enter hex color for unread portion (e.g., #C0C0C0)"),
-                                            input = current_color,
-                                            input_hint = "#RRGGBB",
-                                            buttons = {
-                                                {
-                                                    {
-                                                        text = _("Cancel"),
-                                                        callback = function()
-                                                            UIManager:close(input_dialog)
-                                                        end,
-                                                    },
-                                                    {
-                                                        text = _("Reset to default"),
-                                                        callback = function()
-                                                            h_settings.progress_bar_unread_color = nil
-                                                            saveHeaderSettings(h_settings)
-                                                            touchmenu_instance:updateItems()
-                                                            if self.ui and self.ui.document then
-                                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                                            end
-                                                            UIManager:close(input_dialog)
-                                                        end,
-                                                    },
-                                                    {
-                                                        text = _("Save"),
-                                                        is_enter_default = true,
-                                                        callback = function()
-                                                            local text = input_dialog:getInputText()
-                                                            if text and text ~= "" then
-                                                                if not validateHexColor(text) then
-                                                                    UIManager:show(require("ui/widget/infomessage"):new{
-                                                                        text = _("Invalid color format. Use #RGB or #RRGGBB."),
-                                                                    })
-                                                                    return
-                                                                end
-                                                                h_settings.progress_bar_unread_color = text
-                                                                saveHeaderSettings(h_settings)
-                                                                touchmenu_instance:updateItems()
-                                                                if self.ui and self.ui.document then
-                                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                                end
-                                                                UIManager:close(input_dialog)
-                                                            end
-                                                        end,
-                                                    },
-                                                },
-                                            },
-                                        }
-                                        UIManager:show(input_dialog)
-                                        input_dialog:onShowKeyboard()
-                                    else
-                                        -- B/W device: use SpinWidget for grayscale slider
-                                        local current_value = hexToGrayscaleValue(current_color)
-                                        local SpinWidget = require("ui/widget/spinwidget")
-                                        local spin_widget = SpinWidget:new{
-                                            value = current_value,
-                                            value_min = 0,
-                                            value_max = 255,
-                                            value_step = 5,
-                                            value_hold_step = 15,
-                                            title_text = _("Unread portion value"),
-                                            info_text = _("0 = black, 255 = white"),
-                                            ok_text = _("Set value"),
-                                            extra_text = _("Reset to default"),
-                                            extra_callback = function()
-                                                h_settings.progress_bar_unread_color = nil
-                                                saveHeaderSettings(h_settings)
-                                                touchmenu_instance:updateItems()
-                                                if self.ui and self.ui.document then
-                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                end
-                                            end,
-                                            callback = function(spin)
-                                                h_settings.progress_bar_unread_color = grayscaleValueToHex(spin.value)
-                                                saveHeaderSettings(h_settings)
-                                                touchmenu_instance:updateItems()
-                                                if self.ui and self.ui.document then
-                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                end
-                                            end,
-                                        }
-                                        UIManager:show(spin_widget)
-                                    end
-                                end,
-                                keep_menu_open = true,
-                            },
-                            {
-                                text_func = function()
-                                    local h_settings = getHeaderSettings()
-                                    local defaults = getDefaultProgressBarColors()
-                                    local color = h_settings.progress_bar_marker_color or defaults.marker
+                                    local defs = getDefaultProgressBarColors()
+                                    local color = h_settings.progress_bar_marker_color or defs.marker
                                     local marker_status = ""
                                     if h_settings.chapter_markers == "none" or h_settings.progress_bar_mode == "chapter" then
                                         marker_status = " (" .. _("not shown") .. ")"
@@ -2501,106 +2578,11 @@ Examples:
                                     if isColorDevice() then
                                         return T(_("Chapter marker: %1%2"), color, marker_status)
                                     else
-                                        local gray_val = hexToGrayscaleValue(color)
-                                        return T(_("Chapter marker: %1%2"), gray_val, marker_status)
+                                        return T(_("Chapter marker: %1%2"), hexToGrayscaleValue(color), marker_status)
                                     end
-                                end,
-                                callback = function(touchmenu_instance)
-                                    local h_settings = getHeaderSettings()
-                                    local defaults = getDefaultProgressBarColors()
-                                    local current_color = h_settings.progress_bar_marker_color or defaults.marker
-                                    
-                                    if isColorDevice() then
-                                        -- Color device: use InputDialog for hex color
-                                        local InputDialog = require("ui/widget/inputdialog")
-                                        local input_dialog
-                                        input_dialog = InputDialog:new{
-                                            title = _("Enter hex color for chapter markers (e.g., #000000)"),
-                                            input = current_color,
-                                            input_hint = "#RRGGBB",
-                                            buttons = {
-                                                {
-                                                    {
-                                                        text = _("Cancel"),
-                                                        callback = function()
-                                                            UIManager:close(input_dialog)
-                                                        end,
-                                                    },
-                                                    {
-                                                        text = _("Reset to default"),
-                                                        callback = function()
-                                                            h_settings.progress_bar_marker_color = nil
-                                                            saveHeaderSettings(h_settings)
-                                                            touchmenu_instance:updateItems()
-                                                            if self.ui and self.ui.document then
-                                                                UIManager:setDirty(self.ui.dialog, "ui")
-                                                            end
-                                                            UIManager:close(input_dialog)
-                                                        end,
-                                                    },
-                                                    {
-                                                        text = _("Save"),
-                                                        is_enter_default = true,
-                                                        callback = function()
-                                                            local text = input_dialog:getInputText()
-                                                            if text and text ~= "" then
-                                                                if not validateHexColor(text) then
-                                                                    UIManager:show(require("ui/widget/infomessage"):new{
-                                                                        text = _("Invalid color format. Use #RGB or #RRGGBB."),
-                                                                    })
-                                                                    return
-                                                                end
-                                                                h_settings.progress_bar_marker_color = text
-                                                                saveHeaderSettings(h_settings)
-                                                                touchmenu_instance:updateItems()
-                                                                if self.ui and self.ui.document then
-                                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                                end
-                                                                UIManager:close(input_dialog)
-                                                            end
-                                                        end,
-                                                    },
-                                                },
-                                            },
-                                        }
-                                        UIManager:show(input_dialog)
-                                        input_dialog:onShowKeyboard()
-                                    else
-                                        -- B/W device: use SpinWidget for grayscale slider
-                                        local current_value = hexToGrayscaleValue(current_color)
-                                        local SpinWidget = require("ui/widget/spinwidget")
-                                        local spin_widget = SpinWidget:new{
-                                            value = current_value,
-                                            value_min = 0,
-                                            value_max = 255,
-                                            value_step = 5,
-                                            value_hold_step = 15,
-                                            title_text = _("Chapter marker value"),
-                                            info_text = _("0 = black, 255 = white"),
-                                            ok_text = _("Set value"),
-                                            extra_text = _("Reset to default"),
-                                            extra_callback = function()
-                                                h_settings.progress_bar_marker_color = nil
-                                                saveHeaderSettings(h_settings)
-                                                touchmenu_instance:updateItems()
-                                                if self.ui and self.ui.document then
-                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                end
-                                            end,
-                                            callback = function(spin)
-                                                h_settings.progress_bar_marker_color = grayscaleValueToHex(spin.value)
-                                                saveHeaderSettings(h_settings)
-                                                touchmenu_instance:updateItems()
-                                                if self.ui and self.ui.document then
-                                                    UIManager:setDirty(self.ui.dialog, "ui")
-                                                end
-                                            end,
-                                        }
-                                        UIManager:show(spin_widget)
-                                    end
-                                end,
-                                keep_menu_open = true,
-                            },
+                                end
+                                return item
+                            end)(),
                             {
                                 text = _("Reset all to default"),
                                 callback = function(touchmenu_instance)
