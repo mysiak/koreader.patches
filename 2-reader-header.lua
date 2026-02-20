@@ -828,6 +828,9 @@ local GENERATORS = {
 local _ReaderView_paintTo_orig = ReaderView.paintTo
 local header_settings = G_reader_settings:readSetting("footer")
 
+-- Runtime flag: disables status bar rendering during page browser thumbnail generation
+local _page_browser_active = false
+
 -- Touch zones
 local function setupHeaderTouchZone(reader_ui)
     if not Device:isTouchDevice() then return end
@@ -902,6 +905,7 @@ ReaderView.paintTo = function(self, bb, x, y)
     _ReaderView_paintTo_orig(self, bb, x, y)
     -- Removed render_mode check to enable header on all document types (PDFs, CBZs, etc.) like footer
     if not isHeaderEnabled() then return end -- Exit if disabled
+    if _page_browser_active then return end -- Skip rendering during page browser thumbnail generation
     
     -- Cache settings - fetch once per render
     local h_settings = getHeaderSettings()
@@ -1505,6 +1509,27 @@ ReaderView.onCloseDocument = function(self, ...)
     saveHeaderSettings(h_settings)
     if orig_ReaderView_onCloseDocument then
         return orig_ReaderView_onCloseDocument(self, ...)
+    end
+end
+
+-- Hook PageBrowserWidget to disable status bar during page browser thumbnail generation
+-- This prevents the full header render on each thumbnail, significantly speeding up preview generation
+local ok_pb, PageBrowserWidget = pcall(require, "ui/widget/pagebrowserwidget")
+if ok_pb and PageBrowserWidget then
+    local orig_PageBrowserWidget_init = PageBrowserWidget.init
+    PageBrowserWidget.init = function(self, ...)
+        _page_browser_active = true
+        if orig_PageBrowserWidget_init then
+            return orig_PageBrowserWidget_init(self, ...)
+        end
+    end
+
+    local orig_PageBrowserWidget_onCloseWidget = PageBrowserWidget.onCloseWidget
+    PageBrowserWidget.onCloseWidget = function(self, ...)
+        _page_browser_active = false
+        if orig_PageBrowserWidget_onCloseWidget then
+            return orig_PageBrowserWidget_onCloseWidget(self, ...)
+        end
     end
 end
 
