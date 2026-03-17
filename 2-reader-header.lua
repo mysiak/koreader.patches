@@ -1,7 +1,7 @@
 -- Based on these two patches:
 -- https://github.com/oh1apps/koreader_header by @oh1apps
 -- https://github.com/sebdelsol/KOReader.patches/blob/main/2-statusbar-thin-chapter.lua by @sebdelsol
--- Updated by @mysiak with Github Copilot and Claude Sonnet 4.6
+-- Updated by @mysiak with Github Copilot and Claude Sonnet 4.5
 -- Optimizations and code cleanup by Claude Opus 4.5
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -1509,18 +1509,6 @@ ReaderView.onFrontlightStateChanged = function(self, ...)
                 UIManager:setDirty(self.ui.dialog, "ui")
             end
         end)
-    end
-end
-
--- Hook into ReaderView to handle screen dimension changes (rotation)
-local orig_ReaderView_onSetDimensions = ReaderView.onSetDimensions
-ReaderView.onSetDimensions = function(self, dimen, ...)
-    if orig_ReaderView_onSetDimensions then
-        orig_ReaderView_onSetDimensions(self, dimen, ...)
-    end
-    -- Force header refresh on screen rotation/resize
-    if isHeaderEnabled() and self.ui and self.ui.dialog then
-        UIManager:setDirty(self.ui.dialog, "ui")
     end
 end
 
