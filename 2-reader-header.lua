@@ -1,7 +1,7 @@
 -- Based on these two patches:
 -- https://github.com/oh1apps/koreader_header by @oh1apps
 -- https://github.com/sebdelsol/KOReader.patches/blob/main/2-statusbar-thin-chapter.lua by @sebdelsol
--- Updated by @mysiak with Github Copilot and Claude Sonnet 4.5
+-- Updated by @mysiak with Github Copilot and Claude Sonnet 4.6
 -- Optimizations and code cleanup by Claude Opus 4.5
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -32,8 +32,8 @@ local ReaderFooter = require("apps/reader/modules/readerfooter")
 -- Available header items
 local HEADER_ITEMS = {
     time = { name = T(_("Current time (%1)"), "⌚"), generator = nil, is_spacer = false },
-    battery = { name = T(_("Battery percentage (%1)"), "Batt"), generator = nil, is_spacer = false },
-    wifi = { name = T(_("Wi-Fi status (%1)"), ""), generator = nil, is_spacer = false },
+    battery = { name = T(_("Battery percentage (%1)"), ""), generator = nil, is_spacer = false },
+    wifi = { name = T(_("Wi-Fi status (%1)"), ""), generator = nil, is_spacer = false },
     percentage = { name = T(_("Progress percentage (%1)"), "%"), generator = nil, is_spacer = false },
     page_progress = { name = T(_("Current page (%1)"), "/"), generator = nil, is_spacer = false },
     pages_left_book = { name = T(_("Pages left in book (%1)"), "→"), generator = nil, is_spacer = false },
@@ -46,7 +46,7 @@ local HEADER_ITEMS = {
     chapter = { name = _("Chapter title"), generator = nil, is_spacer = false },
     frontlight = { name = T(_("Brightness level (%1)"), "☼"), generator = nil, is_spacer = false },
     frontlight_warmth = { name = T(_("Warmth level (%1)"), "⊛"), generator = nil, is_spacer = false },
-    mem_usage = { name = T(_("KOReader memory usage (%1)"), "Mem"), generator = nil, is_spacer = false },
+    mem_usage = { name = T(_("KOReader memory usage (%1)"), ""), generator = nil, is_spacer = false },
     bookmark_count = { name = T(_("Bookmark count (%1)"), "\u{F097}"), generator = nil, is_spacer = false },
     custom_text = { name = _("Custom text"), generator = nil, is_spacer = false, is_dynamic = true },
     spacer = { name = _("Dynamic filler"), generator = nil, is_spacer = true },
@@ -65,9 +65,9 @@ local ITEMS_ORDER = {
 -- Separator styles
 local SEPARATOR_STYLES = {
     "  ",
-    " � ",
+    " • ",
     " - ",
-    " 0 ",
+    " ○ ",
     " : ",
     "custom",
 }
@@ -136,7 +136,6 @@ local function getHeaderSettings()
     if settings.show_progress_bar == nil then settings.show_progress_bar = true end
     if settings.progress_bar_height == nil then settings.progress_bar_height = 3 end
     if settings.progress_bar_mode == nil then settings.progress_bar_mode = "book" end
-    if settings.show_chapter_markers == nil then settings.show_chapter_markers = false end
     if settings.font_size == nil then settings.font_size = 14 end
     if settings.font_bold == nil then settings.font_bold = false end
     if settings.custom_texts == nil then settings.custom_texts = {} end
@@ -149,10 +148,6 @@ local function getHeaderSettings()
     if settings.background_opacity == nil then settings.background_opacity = 70 end
     if settings.background_enabled == nil then settings.background_enabled = false end
     if settings.auto_background_for_pdf == nil then settings.auto_background_for_pdf = true end
-    -- Initialize color settings (default to nil = use ProgressWidget defaults)
-    if settings.progress_bar_read_color == nil then settings.progress_bar_read_color = nil end
-    if settings.progress_bar_unread_color == nil then settings.progress_bar_unread_color = nil end
-    if settings.progress_bar_marker_color == nil then settings.progress_bar_marker_color = nil end
     -- Initialize color inversion settings
     if settings.invert_colors == nil then settings.invert_colors = false end
     if settings.footer_invert_colors == nil then settings.footer_invert_colors = false end
@@ -162,7 +157,7 @@ local function getHeaderSettings()
     if settings.separator_enabled == nil then settings.separator_enabled = false end
     if settings.separator_color == nil then settings.separator_color = "#000000" end
     if settings.separator_thickness == nil then settings.separator_thickness = 2 end
-    if settings.separator_top_margin == nil then settings.separator_top_margin = 0 end
+    if settings.separator_top_margin == nil then settings.separator_top_margin = 4 end
     if settings.separator_side_margin == nil then settings.separator_side_margin = 0 end
     if settings.separator_follow_book_margins == nil then settings.separator_follow_book_margins = false end
     
@@ -831,6 +826,11 @@ local header_settings = G_reader_settings:readSetting("footer")
 -- Runtime flag: disables status bar rendering during page browser thumbnail generation
 local _page_browser_active = false
 
+-- Guard: ensures at most one full-refresh timer is queued at a time.
+-- Without this, Night Mode on Android fires a repaint burst that calls scheduleIn on every
+-- iteration, spawning unlimited timer coroutines (the runaway Thread IDs in the ADB log).
+local _full_refresh_pending = false
+
 -- Touch zones
 local function setupHeaderTouchZone(reader_ui)
     if not Device:isTouchDevice() then return end
@@ -1082,7 +1082,7 @@ ReaderView.paintTo = function(self, bb, x, y)
         if add_ellipsis then
             -- Remove trailing spaces (including non-breaking spaces) before adding ellipsis
             fitted_text = fitted_text:gsub("[\u{0020}\u{00A0}]+$", "")
-            fitted_text = fitted_text .. "�"
+            fitted_text = fitted_text .. "…"
         end
         -- Return final widget with proper styling
         return TextWidget:new{
@@ -1368,7 +1368,7 @@ ReaderView.paintTo = function(self, bb, x, y)
             separator_right_margin = h_settings.separator_side_margin or 0
         end
         
-        local separator_top_margin_val = h_settings.separator_top_margin or 0
+        local separator_top_margin_val = h_settings.separator_top_margin or 4
         separator_y = separator_y + separator_top_margin_val
         
         local separator_width = screen_width - separator_left_margin - separator_right_margin
@@ -1393,7 +1393,7 @@ ReaderView.paintTo = function(self, bb, x, y)
         -- Include separator and margins in inversion if enabled
         if h_settings.separator_enabled then
             local separator_top_margin_val = h_settings.separator_top_margin or 4
-            local separator_thickness_val = h_settings.separator_thickness or 3
+            local separator_thickness_val = h_settings.separator_thickness or 2
             invert_height = invert_height + separator_top_margin_val + separator_thickness_val
         end
         bb:invertRect(x, y, screen_width, invert_height)
@@ -1463,10 +1463,14 @@ ReaderFooter.onReaderReady = function(self)
         -- If this is a footer toggle and full refresh is enabled, schedule a delayed full refresh
         if force_repaint then
             local inv_settings = getHeaderSettings()
-            if inv_settings and inv_settings.footer_full_refresh_on_toggle and ftself.view and ftself.view.dialog then
+            if inv_settings and inv_settings.footer_full_refresh_on_toggle
+                    and ftself.view and ftself.view.dialog
+                    and not _full_refresh_pending then
+                _full_refresh_pending = true
                 -- Delay the full refresh to allow the partial refresh to complete first
                 -- This prevents ghosting artifacts that appear when refreshes overlap
                 UIManager:scheduleIn(0.05, function()
+                    _full_refresh_pending = false
                     UIManager:setDirty(ftself.view.dialog, "full")
                 end)
             end
@@ -1475,14 +1479,36 @@ ReaderFooter.onReaderReady = function(self)
 end
 
 -- Hook into ReaderView to handle frontlight state changes for header refresh
+-- Only fires when frontlight or frontlight_warmth items are actually enabled in the header.
+-- Uses a debounce guard to prevent feedback loops on Android/EPD devices where a brightness
+-- event can trigger a surface resize, which would re-enter this hook endlessly.
+local _frontlight_refresh_pending = false
+
+local function hasFrontlightItem()
+    local h_settings = getHeaderSettings()
+    for _, k in ipairs(h_settings.items) do
+        if k == "frontlight" or k == "frontlight_warmth" then
+            return true
+        end
+    end
+    return false
+end
+
 local orig_ReaderView_onFrontlightStateChanged = ReaderView.onFrontlightStateChanged
 ReaderView.onFrontlightStateChanged = function(self, ...)
     if orig_ReaderView_onFrontlightStateChanged then
         orig_ReaderView_onFrontlightStateChanged(self, ...)
     end
-    -- Refresh header when frontlight changes
-    if isHeaderEnabled() and self.ui and self.ui.dialog then
-        UIManager:setDirty(self.ui.dialog, "ui")
+    if isHeaderEnabled() and hasFrontlightItem()
+            and self.ui and self.ui.dialog
+            and not _frontlight_refresh_pending then
+        _frontlight_refresh_pending = true
+        UIManager:scheduleIn(0.15, function()
+            _frontlight_refresh_pending = false
+            if isHeaderEnabled() and self.ui and self.ui.dialog then
+                UIManager:setDirty(self.ui.dialog, "ui")
+            end
+        end)
     end
 end
 
@@ -1590,7 +1616,7 @@ You can use these variables in custom text by wrapping them in curly braces:
 
 Examples:
   By {author}
-  ?? {title}
+  📖 {title}
   {author} - {percentage}]]
                                         UIManager:show(InfoMessage:new{
                                             text = variable_list,
@@ -1659,7 +1685,7 @@ Examples:
                                                 text_func = function()
                                                     local current_settings = getHeaderSettings()
                                                     local current_text = current_settings.custom_texts[idx] or ""
-                                                    local status = current_settings.disabled_custom_texts[idx] and " [?]" or ""
+                                                    local status = current_settings.disabled_custom_texts[idx] and " [✗]" or ""
                                                     return T(_("Text %1: '%2'%3"), idx, current_text, status)
                                                 end,
                                                 sub_item_table = {
@@ -2221,7 +2247,7 @@ Examples:
                 sub_item_table = {
                     createSpinWidgetItem{
                         setting_key = "font_size",
-                        default_value = 18,
+                        default_value = 14,
                         label_text = "Font size: %1",
                         title_text = "Header font size",
                         ok_text = "Set size",
@@ -2297,7 +2323,7 @@ Examples:
                     },
                     createSpinWidgetItem{
                         setting_key = "separator_thickness",
-                        default_value = 3,
+                        default_value = 2,
                         label_text = "Line thickness: %1",
                         title_text = "Separator thickness",
                         ok_text = "Set thickness",
@@ -2454,7 +2480,7 @@ Examples:
                     (function()
                         local item = createSpinWidgetItem{
                             setting_key = "progress_bar_height",
-                            default_value = 4,
+                            default_value = 3,
                             label_text = "Bar height: %1",
                             title_text = "Progress bar height",
                             ok_text = "Set height",
