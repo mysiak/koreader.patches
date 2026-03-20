@@ -11,8 +11,17 @@ local _ = require("gettext")
 local default_min_brightness = 1
 local min_brightness_setting = G_reader_settings:readSetting("brightness_tweaks_min_brightness", default_min_brightness)
 local round_to_5_setting = G_reader_settings:readSetting("brightness_tweaks_round_to_5", false)
+local exponential_gesture_setting = G_reader_settings:readSetting("brightness_tweaks_exponential_gesture", false)
 local usb_brightness_enabled = G_reader_settings:readSetting("brightness_tweaks_usb_enabled", false)
 local usb_brightness_level = G_reader_settings:readSetting("brightness_tweaks_usb_level", 5)
+
+-- Keep sticky rounding and exponential gesture steps mutually exclusive.
+if round_to_5_setting and exponential_gesture_setting then
+    round_to_5_setting = false
+    G_reader_settings:saveSetting("brightness_tweaks_round_to_5", false)
+end
+
+local exponential_levels = { 0, 1, 2, 4, 8, 16, 32, 64, 100 }
 
 -- State
 local is_manual_change = false
@@ -151,6 +160,54 @@ if Device:hasFrontlight() then
         is_manual_change = true
         return setFrontLightIntensity_orig(self, intensity)
     end
+
+    local function getNearestExponentialIndex(intensity)
+        local nearest_idx = 1
+        local nearest_dist = math.abs((intensity or 0) - exponential_levels[1])
+        for i = 2, #exponential_levels do
+            local dist = math.abs((intensity or 0) - exponential_levels[i])
+            if dist < nearest_dist then
+                nearest_dist = dist
+                nearest_idx = i
+            end
+        end
+        return nearest_idx
+    end
+
+    local DeviceListener = require("device/devicelistener")
+    local onChangeFlIntensity_orig = DeviceListener.onChangeFlIntensity
+
+    DeviceListener.onChangeFlIntensity = function(self, ges, direction)
+        if not exponential_gesture_setting then
+            return onChangeFlIntensity_orig(self, ges, direction)
+        end
+
+        local dir = direction
+        if dir ~= -1 and dir ~= 1 then
+            dir = 1
+        end
+
+        local current_intensity = powerd:isFrontlightOff() and 0 or powerd:frontlightIntensity()
+        local current_idx = getNearestExponentialIndex(current_intensity)
+        local next_idx
+        if dir == 1 then
+            next_idx = math.min(current_idx + 1, #exponential_levels)
+        else
+            next_idx = math.max(current_idx - 1, 1)
+        end
+
+        local next_intensity = exponential_levels[next_idx]
+        if next_intensity <= 0 then
+            powerd:turnOffFrontlight()
+        else
+            -- Bypass min/round modifiers for explicit exponential step values.
+            is_manual_change = true
+            powerd:setIntensity(next_intensity)
+        end
+        powerd:updateResumeFrontlightState()
+        self:onShowIntensity()
+        return true
+    end
 end
 
 -- Menu
@@ -199,6 +256,24 @@ function ReaderMenu:setUpdateItemTable()
                 callback = function()
                     round_to_5_setting = not round_to_5_setting
                     G_reader_settings:saveSetting("brightness_tweaks_round_to_5", round_to_5_setting)
+                    if round_to_5_setting and exponential_gesture_setting then
+                        exponential_gesture_setting = false
+                        G_reader_settings:saveSetting("brightness_tweaks_exponential_gesture", false)
+                    end
+                end,
+            },
+            {
+                text = _("Exponential gesture steps"),
+                checked_func = function()
+                    return exponential_gesture_setting
+                end,
+                callback = function()
+                    exponential_gesture_setting = not exponential_gesture_setting
+                    G_reader_settings:saveSetting("brightness_tweaks_exponential_gesture", exponential_gesture_setting)
+                    if exponential_gesture_setting and round_to_5_setting then
+                        round_to_5_setting = false
+                        G_reader_settings:saveSetting("brightness_tweaks_round_to_5", false)
+                    end
                 end,
             },
             {
