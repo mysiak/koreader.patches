@@ -195,8 +195,13 @@ if Device:hasFrontlight() then
         else
             next_idx = math.max(current_idx - 1, 1)
         end
-
         local next_intensity = exponential_levels[next_idx]
+
+        -- Keep exponential steps while honoring a configured non-zero minimum.
+        if next_intensity > 0 and min_brightness_setting > 0 then
+            next_intensity = math.max(next_intensity, min_brightness_setting)
+        end
+
         if next_intensity <= 0 then
             powerd:turnOffFrontlight()
         else
